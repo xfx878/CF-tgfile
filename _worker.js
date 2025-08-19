@@ -257,7 +257,7 @@ async function handleAdminRequest(request, config) {
     const fileSize = formatSize(file.file_size || 0);
     const createdAt = new Date(file.created_at).toISOString().replace('T', ' ').split('.')[0];
     const cardNumber = `KP_${String(index + 1).padStart(3, '0')}`;
-    // 文件预览信息和操作元素
+    // [FIX] 为下载链接添加 ?download=true 参数
     return `
       <div class="file-card" data-url="${file.url}">
         <input type="checkbox" class="file-checkbox">
@@ -273,7 +273,7 @@ async function handleAdminRequest(request, config) {
         <div class="file-actions">
           <button class="btn btn-copy" onclick="showQRCode('${file.url}')">分享</button>
           <button class="btn btn-edit" onclick="editFileName(this, '${file.url}', '${fileName}')">编辑</button>
-          <a class="btn btn-down" href="${file.url}" download="${fileName}">下载</a>
+          <a class="btn btn-down" href="${file.url}?download=true" download="${fileName}">下载</a>
           <button class="btn btn-delete" onclick="deleteFile('${file.url}')">删除</button>
         </div>
       </div>
@@ -357,7 +357,8 @@ function getPreviewHtml(url, mimeType) {
 
 // 获取文件并缓存
 async function handleFileRequest(request, config) {
-  const url = request.url;
+  const requestUrl = new URL(request.url);
+  const url = requestUrl.origin + requestUrl.pathname; // Use URL without query string for cache key and DB lookup
   const cache = caches.default;
   const cacheKey = new Request(url);
 
@@ -366,7 +367,16 @@ async function handleFileRequest(request, config) {
     const cachedResponse = await cache.match(cacheKey);
     if (cachedResponse) {
       console.log(`[Cache Hit] ${url}`);
-      return cachedResponse;
+      // Clone response to add new headers based on query params
+      const newHeaders = new Headers(cachedResponse.headers);
+      const dispositionType = requestUrl.searchParams.get('download') === 'true' ? 'attachment' : 'inline';
+      const fileName = newHeaders.get('Content-Disposition').split("''")[1]; // Extract filename
+      newHeaders.set('Content-Disposition', `${dispositionType}; filename*=UTF-8''${fileName}`);
+      return new Response(cachedResponse.body, {
+        status: cachedResponse.status,
+        statusText: cachedResponse.statusText,
+        headers: newHeaders
+      });
     }
 
     // 从数据库查询文件
@@ -421,6 +431,9 @@ async function handleFileRequest(request, config) {
 
     // 使用存储的 MIME 类型或根据扩展名判断
     const contentType = file.mime_type || getContentType(url.split('.').pop().toLowerCase());
+    
+    // [FIX] 根据URL参数决定Content-Disposition是inline还是attachment
+    const dispositionType = requestUrl.searchParams.get('download') === 'true' ? 'attachment' : 'inline';
 
     // 创建响应并缓存
     const response = new Response(fileResponse.body, {
@@ -429,12 +442,16 @@ async function handleFileRequest(request, config) {
         'Cache-Control': 'public, max-age=31536000',
         'X-Content-Type-Options': 'nosniff',
         'Access-Control-Allow-Origin': '*',
-        'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(file.file_name || '')}`
+        'Content-Disposition': `${dispositionType}; filename*=UTF-8''${encodeURIComponent(file.file_name || '')}`
       }
     });
 
-    await cache.put(cacheKey, response.clone());
-    console.log(`[Cache Set] ${url}`);
+    // Only cache the response if it's for inline display to avoid caching the download version
+    if (dispositionType === 'inline') {
+        await cache.put(cacheKey, response.clone());
+        console.log(`[Cache Set] ${url}`);
+    }
+    
     return response;
 
   } catch (error) {
