@@ -11,8 +11,7 @@ async function initDatabase(config) {
       created_at INTEGER NOT NULL,
       file_name TEXT,
       file_size INTEGER,
-      mime_type TEXT,
-      password TEXT
+      mime_type TEXT
     )
   `).run();
 }
@@ -51,7 +50,6 @@ export default {
       '/upload': () => handleUploadRequest(request, config),
       '/admin': () => handleAdminRequest(request, config),
       '/delete': () => handleDeleteRequest(request, config),
-      '/delete-multiple': () => handleDeleteMultipleRequest(request, config), // 新增批量删除路由
       '/search': () => handleSearchRequest(request, config),
       '/bing': handleBingImagesRequest
     };
@@ -151,8 +149,6 @@ async function handleUploadRequest(request, config) {
   try {
     const formData = await request.formData();
     const file = formData.get('file');
-    const password = formData.get('password') || null; // 获取密码
-
     if (!file) throw new Error('未找到文件');
     if (file.size > config.maxSizeMB * 1024 * 1024) throw new Error(`文件超过${config.maxSizeMB}MB限制`);
     
@@ -196,8 +192,8 @@ async function handleUploadRequest(request, config) {
     const url = `https://${config.domain}/${time}.${ext}`;
     
     await config.database.prepare(`
-      INSERT INTO files (url, fileId, message_id, created_at, file_name, file_size, mime_type, password) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO files (url, fileId, message_id, created_at, file_name, file_size, mime_type) 
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).bind(
       url,
       fileId,
@@ -205,8 +201,7 @@ async function handleUploadRequest(request, config) {
       timestamp,
       file.name,
       file.size,
-      file.type || getContentType(ext),
-      password // 存储密码
+      file.type || getContentType(ext)
     ).run();
 
     return new Response(
@@ -241,25 +236,25 @@ async function handleAdminRequest(request, config) {
   }
 
   const files = await config.database.prepare(
-    `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type, password
+    `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type
     FROM files
     ORDER BY created_at DESC`
   ).all();
 
   const fileList = files.results || [];
   
-  // 统计数据
+  // 新增：计算文件总数和总大小
   const totalFiles = fileList.length;
   const totalSize = fileList.reduce((sum, file) => sum + (file.file_size || 0), 0);
+  const stats = {
+    count: totalFiles,
+    size: formatSize(totalSize)
+  };
 
   const fileCards = fileList.map(file => {
     const fileName = file.file_name;
     const fileSize = formatSize(file.file_size || 0);
     const createdAt = new Date(file.created_at).toISOString().replace('T', ' ').split('.')[0];
-    const passwordInfo = file.password 
-      ? `<div>密码: <span class="password" title="点击复制密码" onclick="copyText('${file.password}', this)">${file.password}</span></div>`
-      : '<div>密码: 无</div>';
-
     // 文件预览信息和操作元素
     return `
       <div class="file-card" data-url="${file.url}">
@@ -271,7 +266,6 @@ async function handleAdminRequest(request, config) {
           <div>${fileName}</div>
           <div>${fileSize}</div>
           <div>${createdAt}</div>
-          ${passwordInfo}
         </div>
         <div class="file-actions">
           <button class="btn btn-copy" onclick="showQRCode('${file.url}')">分享</button>
@@ -295,7 +289,7 @@ async function handleAdminRequest(request, config) {
     </div>
   `;
 
-  const html = generateAdminPage(fileCards, qrModal, totalFiles, totalSize);
+  const html = generateAdminPage(fileCards, qrModal, stats);
   return new Response(html, {
     headers: { 'Content-Type': 'text/html;charset=UTF-8' }
   });
@@ -311,7 +305,7 @@ async function handleSearchRequest(request, config) {
     const { query } = await request.json();
     const searchPattern = `%${query}%`;    
     const files = await config.database.prepare(
-      `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type, password
+      `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type
        FROM files 
        WHERE file_name LIKE ? ESCAPE '!'
        COLLATE NOCASE
@@ -335,9 +329,9 @@ async function handleSearchRequest(request, config) {
 // 支持预览的文件类型
 function getPreviewHtml(url) {
   const ext = (url.split('.').pop() || '').toLowerCase();
-  const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico'].includes(ext);
-  const isVideo = ['mp4', 'webm', 'mov', 'avi'].includes(ext);
-  const isAudio = ['mp3', 'wav', 'ogg', 'flac'].includes(ext);
+  const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'icon'].includes(ext);
+  const isVideo = ['mp4', 'webm'].includes(ext);
+  const isAudio = ['mp3', 'wav', 'ogg'].includes(ext);
 
   if (isImage) {
     return `<img src="${url}" alt="预览" loading="lazy">`;
@@ -352,41 +346,30 @@ function getPreviewHtml(url) {
 
 // 获取文件并缓存
 async function handleFileRequest(request, config) {
-  const url = new URL(request.url);
+  const url = request.url;
   const cache = caches.default;
-  const cacheKey = new Request(url.toString());
+  const cacheKey = new Request(url);
 
   try {
     // 尝试从缓存获取
     const cachedResponse = await cache.match(cacheKey);
     if (cachedResponse) {
-      console.log(`[Cache Hit] ${url.toString()}`);
+      console.log(`[Cache Hit] ${url}`);
       return cachedResponse;
     }
 
     // 从数据库查询文件
     const file = await config.database.prepare(
-      `SELECT fileId, message_id, file_name, mime_type, password
+      `SELECT fileId, message_id, file_name, mime_type
       FROM files WHERE url = ?`
-    ).bind(url.origin + url.pathname).first();
+    ).bind(url).first();
 
     if (!file) {
-      console.log(`[404] File not found: ${url.toString()}`);
+      console.log(`[404] File not found: ${url}`);
       return new Response('文件不存在', { 
         status: 404,
         headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
       });
-    }
-
-    // 检查密码
-    if (file.password) {
-        const providedPassword = url.searchParams.get('password');
-        if (providedPassword !== file.password) {
-            return new Response(generatePasswordPromptPage(url.toString()), {
-                status: 403,
-                headers: { 'Content-Type': 'text/html;charset=UTF-8' }
-            });
-        }
     }
 
     // 获取 Telegram 文件路径
@@ -426,7 +409,7 @@ async function handleFileRequest(request, config) {
     }
 
     // 使用存储的 MIME 类型或根据扩展名判断
-    const contentType = file.mime_type || getContentType(url.pathname.split('.').pop().toLowerCase());
+    const contentType = file.mime_type || getContentType(url.split('.').pop().toLowerCase());
 
     // 创建响应并缓存
     const response = new Response(fileResponse.body, {
@@ -440,11 +423,11 @@ async function handleFileRequest(request, config) {
     });
 
     await cache.put(cacheKey, response.clone());
-    console.log(`[Cache Set] ${url.toString()}`);
+    console.log(`[Cache Set] ${url}`);
     return response;
 
   } catch (error) {
-    console.error(`[Error] ${error.message} for ${url.toString()}`);
+    console.error(`[Error] ${error.message} for ${url}`);
     return new Response('服务器内部错误', { 
       status: 500,
       headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
@@ -459,126 +442,81 @@ async function handleDeleteRequest(request, config) {
   }
 
   try {
-    const { url } = await request.json();
-    if (!url || typeof url !== 'string') {
-      return new Response(JSON.stringify({ error: '无效的URL' }), {
+    const { urls } = await request.json();
+    if (!urls || !Array.isArray(urls) || urls.length === 0) {
+      return new Response(JSON.stringify({ error: '无效的URL列表' }), {
         status: 400, 
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    const file = await config.database.prepare(
-      'SELECT fileId, message_id FROM files WHERE url = ?'
-    ).bind(url).first();    
-    if (!file) {
-      return new Response(JSON.stringify({ error: '文件不存在' }), { 
-        status: 404, 
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }    
+    const results = [];
+    for (const url of urls) {
+      const file = await config.database.prepare(
+        'SELECT fileId, message_id FROM files WHERE url = ?'
+      ).bind(url).first();
 
-    let deleteError = null;
-
-    try {
-      const deleteResponse = await fetch(
-        `https://api.telegram.org/bot${config.tgBotToken}/deleteMessage?chat_id=${config.tgChatId}&message_id=${file.message_id}`
-      );
-      if (!deleteResponse.ok) {
-        const errorData = await deleteResponse.json();
-        console.error(`[Telegram API Error] ${JSON.stringify(errorData)}`);
-        throw new Error(`Telegram 消息删除失败: ${errorData.description}`);
+      if (!file) {
+        results.push({ url, success: false, error: '文件不存在' });
+        continue;
       }
-    } catch (error) { deleteError = error.message; }
 
-    // 删除数据库表数据，即使Telegram删除失败也会删除数据库记录
-    await config.database.prepare('DELETE FROM files WHERE url = ?').bind(url).run();
+      let deleteError = null;
+      try {
+        const deleteResponse = await fetch(
+          `https://api.telegram.org/bot${config.tgBotToken}/deleteMessage?chat_id=${config.tgChatId}&message_id=${file.message_id}`
+        );
+        if (!deleteResponse.ok) {
+          const errorData = await deleteResponse.json();
+          throw new Error(errorData.description || 'Telegram API 错误');
+        }
+      } catch (error) {
+        deleteError = error.message;
+      }
+
+      await config.database.prepare('DELETE FROM files WHERE url = ?').bind(url).run();
+
+      if (deleteError) {
+        results.push({ url, success: true, message: `数据库记录已删除，但TG消息删除失败: ${deleteError}` });
+      } else {
+        results.push({ url, success: true, message: '文件删除成功' });
+      }
+    }
     
-    // 从缓存中删除
-    await caches.default.delete(new Request(url));
-
-    return new Response(
-      JSON.stringify({ 
-        success: true,
-        message: deleteError ? `文件已从数据库删除，但Telegram消息删除失败: ${deleteError}` : '文件删除成功'
-      }),
-      { headers: { 'Content-Type': 'application/json' }}
-    );
+    return new Response(JSON.stringify({ results }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
 
   } catch (error) {
     console.error(`[Delete Error] ${error.message}`);
     return new Response(
-      JSON.stringify({ 
-        error: error.message.includes('message to delete not found') ? 
-              '文件已从频道移除' : error.message 
-      }),
+      JSON.stringify({ error: error.message }),
       { status: 500, headers: { 'Content-Type': 'application/json' }}
     );
   }
 }
 
-// 处理批量删除
-async function handleDeleteMultipleRequest(request, config) {
-    if (config.enableAuth && !authenticate(request, config)) {
-        return new Response(JSON.stringify({ error: '未授权' }), { status: 401 });
-    }
 
-    try {
-        const { urls } = await request.json();
-        if (!Array.isArray(urls) || urls.length === 0) {
-            return new Response(JSON.stringify({ error: '无效的URL列表' }), {
-                status: 400,
-                headers: { 'Content-Type': 'application/json' }
-            });
-        }
-
-        let successCount = 0;
-        let failedCount = 0;
-        const errors = [];
-
-        for (const url of urls) {
-            try {
-                const file = await config.database.prepare('SELECT message_id FROM files WHERE url = ?').bind(url).first();
-                if (file) {
-                    await fetch(`https://api.telegram.org/bot${config.tgBotToken}/deleteMessage?chat_id=${config.tgChatId}&message_id=${file.message_id}`);
-                    await config.database.prepare('DELETE FROM files WHERE url = ?').bind(url).run();
-                    await caches.default.delete(new Request(url));
-                }
-                successCount++;
-            } catch (e) {
-                failedCount++;
-                errors.push(`删除 ${url} 失败: ${e.message}`);
-                console.error(`[Multiple Delete Error] ${url}: ${e.message}`);
-            }
-        }
-
-        return new Response(JSON.stringify({
-            success: true,
-            message: `成功删除 ${successCount} 个文件，失败 ${failedCount} 个。`,
-            errors
-        }), { headers: { 'Content-Type': 'application/json' } });
-
-    } catch (error) {
-        console.error(`[Batch Delete Error] ${error.message}`);
-        return new Response(JSON.stringify({ error: '批量删除过程中发生服务器错误' }), { status: 500 });
-    }
-}
-
-// 支持上传的文件类型 (支持任意格式)
+// 支持上传的文件类型
 function getContentType(ext) {
   const types = {
     jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
-    webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon',
-    mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', avi: 'video/x-msvideo',
-    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', flac: 'audio/flac',
+    webp: 'image/webp', svg: 'image/svg+xml', icon: 'image/x-icon',
+    mp4: 'video/mp4', webm: 'video/webm',
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
     pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown',
-    zip: 'application/zip', rar: 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
+    zip: 'application/zip', rar: 'application/x-rar-compressed',
     json: 'application/json', xml: 'application/xml', ini: 'text/plain',
-    js: 'application/javascript', css: 'text/css', html: 'text/html',
-    yml: 'application/yaml', yaml: 'application/yaml',
+    js: 'application/javascript', yml: 'application/yaml', yaml: 'application/yaml',
     py: 'text/x-python', sh: 'application/x-sh',
-    doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    // 添加更多办公和常见文件类型
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '7z': 'application/x-7z-compressed'
   };
   return types[ext] || 'application/octet-stream';
 }
@@ -626,8 +564,13 @@ async function handleBingImagesRequest() {
 function formatSize(bytes) {
     if (bytes === 0) return '0 B';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${units[i]}`;
+    let size = bytes;
+    let unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex++;
+    }
+    return `${size.toFixed(2)} ${units[unitIndex]}`;
 }
 
 // 登录页面生成函数 /login
@@ -646,18 +589,20 @@ function generateLoginPage() {
         justify-content: center;
         align-items: center;
         height: 100vh;
+        background: #f5f5f5;
+        font-family: Arial, sans-serif;
         background-size: cover;
         background-position: center;
-        font-family: Arial, sans-serif;
+        transition: background-image 1s ease-in-out;
       }
       .login-container {
         background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(10px);
         padding: 20px;
         border-radius: 8px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         width: 100%;
         max-width: 400px;
-        backdrop-filter: blur(5px);
       }
       .form-group {
         margin-bottom: 1rem;
@@ -708,9 +653,10 @@ function generateLoginPage() {
       </form>
     </div>
     <script>
+      // 添加背景图相关函数
       async function setBingBackground() {
         try {
-          const response = await fetch('/bing', { cache: 'no-store' });
+          const response = await fetch('/bing');
           const data = await response.json();
           if (data.status && data.data && data.data.length > 0) {
             const randomIndex = Math.floor(Math.random() * data.data.length);
@@ -720,7 +666,9 @@ function generateLoginPage() {
           console.error('获取背景图失败:', error);
         }
       }
+      // 页面加载时设置背景图
       setBingBackground(); 
+      // 每小时更新一次背景图
       setInterval(setBingBackground, 3600000);
 
       document.getElementById('loginForm').addEventListener('submit', async (e) => {
@@ -763,20 +711,21 @@ function generateUploadPage() {
     <style>
       body {
         font-family: Arial, sans-serif;
-        transition: background-image 1s ease-in-out;
         display: flex;
         justify-content: center;
         align-items: center;
         height: 100vh;
+        background: #f5f5f5;
+        margin: 0;
         background-size: cover;
         background-position: center;
-        margin: 0;
+        transition: background-image 1s ease-in-out;
       }
       .container {
         max-width: 800px;
         width: 100%;
         background: rgba(255, 255, 255, 0.8);
-        backdrop-filter: blur(5px);
+        backdrop-filter: blur(10px);
         padding: 10px 40px 20px 40px;
         border-radius: 8px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
@@ -793,7 +742,7 @@ function generateUploadPage() {
         border: 2px dashed #666;
         padding: 40px;
         text-align: center;
-        margin: 0 auto 20px auto;
+        margin: 0 auto;
         border-radius: 8px;
         transition: all 0.3s;
         box-sizing: border-box;
@@ -801,14 +750,6 @@ function generateUploadPage() {
       .upload-area.dragover {
         border-color: #007bff;
         background: #f8f9fa;
-      }
-      #password-input {
-        width: 100%;
-        padding: 10px;
-        margin-bottom: 20px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        box-sizing: border-box;
       }
       .preview-area {
         margin-top: 20px;
@@ -917,7 +858,6 @@ function generateUploadPage() {
         <p>点击选择 或 拖拽文件到此处</p>
         <input type="file" id="fileInput" multiple style="display: none">
       </div>
-      <input type="text" id="password-input" placeholder="可选：为文件链接设置访问密码">
       <div class="preview-area" id="previewArea"></div>
       <div class="url-area">
         <textarea id="urlArea" readonly placeholder="上传完成后的链接将显示在这里"></textarea>
@@ -938,9 +878,10 @@ function generateUploadPage() {
     </div>
 
     <script>
+      // 添加背景图相关函数
       async function setBingBackground() {
         try {
-          const response = await fetch('/bing', { cache: 'no-store' });
+          const response = await fetch('/bing');
           const data = await response.json();
           if (data.status && data.data && data.data.length > 0) {
             const randomIndex = Math.floor(Math.random() * data.data.length);
@@ -950,12 +891,13 @@ function generateUploadPage() {
           console.error('获取背景图失败:', error);
         }
       }
+      // 页面加载时设置背景图
       setBingBackground(); 
+      // 每小时更新一次背景图
       setInterval(setBingBackground, 3600000);
 
       const uploadArea = document.getElementById('uploadArea');
       const fileInput = document.getElementById('fileInput');
-      const passwordInput = document.getElementById('password-input');
       const previewArea = document.getElementById('previewArea');
       const urlArea = document.getElementById('urlArea');
       let uploadedUrls = [];
@@ -1001,7 +943,7 @@ function generateUploadPage() {
         for (let item of items) {
           if (item.kind === 'file') {
             const file = item.getAsFile();
-            await uploadFile(file);
+            await handleFiles({ target: { files: [file] } });
           }
         }
       });
@@ -1014,11 +956,12 @@ function generateUploadPage() {
         const config = await response.json();
         const files = Array.from(e.target.files);
         for (let file of files) {
+          // 直接在上传前进行大小判断
           if (file.size > config.maxSizeMB * 1024 * 1024) {
             alert(\`文件 \${file.name} 超过\${config.maxSizeMB}MB限制\`);
-            continue;
+            continue; // 跳过这个文件，继续处理下一个
           }
-          await uploadFile(file);
+          await uploadFile(file); // 继续上传
         }
       }
 
@@ -1060,9 +1003,6 @@ function generateUploadPage() {
 
         const formData = new FormData();
         formData.append('file', file);
-        if (passwordInput.value) {
-            formData.append('password', passwordInput.value);
-        }
         xhr.open('POST', '/upload');
         xhr.send(formData);
       }
@@ -1094,9 +1034,14 @@ function generateUploadPage() {
 
       function formatSize(bytes) {
         if (bytes === 0) return '0 B';
-        const units = ['B', 'KB', 'MB', 'GB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(1024));
-        return \`\${(bytes / Math.pow(1024, i)).toFixed(2)} \${units[i]}\`;
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let size = bytes;
+        let unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.length - 1) {
+          size /= 1024;
+          unitIndex++;
+        }
+        return \`\${size.toFixed(2)} \${units[unitIndex]}\`;
       }
 
       function updateUrlArea() {
@@ -1129,7 +1074,7 @@ function generateUploadPage() {
 }
 
 // 生成文件管理页面 /admin
-function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
+function generateAdminPage(fileCards, qrModal, stats) {
   return `<!DOCTYPE html>
   <html lang="zh-CN">
   <head>
@@ -1143,9 +1088,10 @@ function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
         font-family: Arial, sans-serif;
         margin: 0;
         padding: 20px;
+        background: #f5f5f5;
         background-size: cover;
         background-position: center;
-        background-attachment: fixed;
+        transition: background-image 1s ease-in-out;
       }
       .container {
         max-width: 1200px;
@@ -1153,29 +1099,27 @@ function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
       }
       .header {
         background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(10px);
         padding: 20px 30px;
         border-radius: 8px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         margin-bottom: 20px;
         display: flex;
-        flex-wrap: wrap;
         justify-content: space-between;
         align-items: center;
-        gap: 15px;
-        backdrop-filter: blur(5px);
+        flex-wrap: wrap;
       }
-      h2 {
-        margin: 0;
-      }
-      .stats {
-        color: red;
-        font-weight: bold;
-        font-size: 1.2em;
-      }
-      .actions-group {
+      .header-left {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 20px;
+      }
+      h2 { margin: 0; }
+      #stats { color: #555; }
+      .header-right {
+        display: flex;
+        align-items: center;
+        gap: 15px;
       }
       .search {
         padding: 8px;
@@ -1184,16 +1128,11 @@ function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
         width: 250px;
         background: rgba(255, 255, 255, 0.5);
       }
-      .btn-header {
-        padding: 8px 12px;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        color: white;
+      .backup {
+        color: #007bff;
+        text-decoration: none;
       }
-      .btn-delete-selected { background: #dc3545; }
-      .btn-back { background: #007bff; text-decoration: none; }
-
+      .backup:hover { text-decoration: underline; }
       .grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -1205,7 +1144,11 @@ function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         overflow: hidden;
         position: relative;
-        backdrop-filter: blur(5px);
+        transition: transform 0.2s, box-shadow 0.2s;
+      }
+      .file-card.selected {
+        transform: translateY(-5px);
+        box-shadow: 0 8px 20px rgba(0, 123, 255, 0.3);
       }
       .file-preview {
         height: 150px;
@@ -1224,17 +1167,6 @@ function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
         font-size: 14px;
         word-break: break-all;
       }
-      .file-info > div {
-        margin-bottom: 5px;
-      }
-      .password {
-        cursor: pointer;
-        background: #eee;
-        padding: 2px 4px;
-        border-radius: 3px;
-        font-family: monospace;
-      }
-      .password:hover { background: #ddd; }
       .file-actions {
         padding: 10px;
         border-top: 1px solid #eee;
@@ -1248,39 +1180,47 @@ function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
         left: 10px;
         top: 10px;
         z-index: 10;
-        width: 18px;
-        height: 18px;
+        transform: scale(1.2);
       }
       .btn {
         padding: 5px 10px;
         border: none;
         border-radius: 4px;
         cursor: pointer;
-        font-size: inherit;
       }
       .btn-delete { background: #dc3545; color: white; }
       .btn-copy { background: #007bff; color: white; }
       .btn-down { background: #28a745; color: white; text-decoration: none; }
       .qr-modal {
-        display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(0, 0, 0, 0.5); justify-content: center; align-items: center; z-index: 1000;
+        display: none; position: fixed; top: 0; left: 0;
+        width: 100%; height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+        justify-content: center; align-items: center; z-index: 1000;
       }
-      .qr-content { background: white; padding: 20px; border-radius: 10px; text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
+      .qr-content {
+        background: white; padding: 20px; border-radius: 10px;
+        text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+      }
       #qrcode { margin: 5px 0; }
       .qr-buttons { display: flex; gap: 10px; justify-content: center; margin-top: 15px; }
-      .qr-copy, .qr-close { padding: 8px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
+      .qr-copy, .qr-close {
+        padding: 8px 20px; background: #007bff; color: white;
+        border: none; border-radius: 5px; cursor: pointer;
+      }
     </style>
   </head>
   <body>
     <div class="container">
       <div class="header">
-        <h2>文件管理</h2>
-        <div class="stats">文件总数: ${totalFiles}, 总大小: ${formatSize(totalSize)}</div>
-        <div class="actions-group">
-            <label><input type="checkbox" id="selectAllCheckbox"> 全选</label>
-            <button class="btn-header btn-delete-selected" id="deleteSelectedBtn">删除选中</button>
-            <input type="text" class="search" placeholder="搜索文件名..." id="searchInput">
-            <a href="/upload" class="btn-header btn-back">返回上传</a>
+        <div class="header-left">
+          <h2>文件管理</h2>
+          <div id="stats">共 ${stats.count} 个文件，总大小 ${stats.size}</div>
+        </div>
+        <div class="header-right">
+          <button id="deleteSelectedBtn" class="btn btn-delete" style="display: none;">删除选中</button>
+          <input type="checkbox" id="selectAllCheckbox" title="全选">
+          <a href="/upload" class="backup">返回上传</a>
+          <input type="text" class="search" placeholder="搜索文件..." id="searchInput">
         </div>
       </div>
       <div class="grid" id="fileGrid">
@@ -1291,69 +1231,36 @@ function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
 
     <script src="https://cdn.jsdelivr.net/npm/qrcodejs/qrcode.min.js"></script>
     <script>
+      // 添加背景图相关函数
       async function setBingBackground() {
         try {
-          const response = await fetch('/bing', { cache: 'no-store' });
+          const response = await fetch('/bing');
           const data = await response.json();
           if (data.status && data.data && data.data.length > 0) {
             const randomIndex = Math.floor(Math.random() * data.data.length);
             document.body.style.backgroundImage = \`url(\${data.data[randomIndex].url})\`;
           }
-        } catch (error) { console.error('获取背景图失败:', error); }
+        } catch (error) {
+          console.error('获取背景图失败:', error);
+        }
       }
+      // 页面加载时设置背景图
       setBingBackground(); 
+      // 每小时更新一次背景图
       setInterval(setBingBackground, 3600000);
 
       const searchInput = document.getElementById('searchInput');
       const fileGrid = document.getElementById('fileGrid');
-      const fileCards = Array.from(fileGrid.children);
-      const selectAllCheckbox = document.getElementById('selectAllCheckbox');
-      const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
-
+      
       searchInput.addEventListener('input', (e) => {
         const searchTerm = e.target.value.toLowerCase();
-        fileCards.forEach(card => {
-          const fileName = card.querySelector('.file-info > div:first-child').textContent.toLowerCase();
+        document.querySelectorAll('.file-card').forEach(card => {
+          const fileName = card.querySelector('.file-info div:first-child').textContent.toLowerCase();
           card.style.display = fileName.includes(searchTerm) ? '' : 'none';
         });
       });
 
-      selectAllCheckbox.addEventListener('change', (e) => {
-        const isChecked = e.target.checked;
-        document.querySelectorAll('.file-checkbox').forEach(checkbox => {
-            checkbox.checked = isChecked;
-        });
-      });
-
-      deleteSelectedBtn.addEventListener('click', async () => {
-        const selectedCheckboxes = document.querySelectorAll('.file-checkbox:checked');
-        if (selectedCheckboxes.length === 0) {
-            alert('请先选择要删除的文件');
-            return;
-        }
-        if (!confirm(\`确定要删除选中的 \${selectedCheckboxes.length} 个文件吗？\')) return;
-
-        const urlsToDelete = Array.from(selectedCheckboxes).map(cb => cb.closest('.file-card').dataset.url);
-        
-        try {
-            const response = await fetch('/delete-multiple', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ urls: urlsToDelete })
-            });
-            const result = await response.json();
-            alert(result.message || '操作完成');
-            urlsToDelete.forEach(url => {
-                const card = document.querySelector(\`[data-url="\${url}"]\`);
-                if (card) card.remove();
-            });
-            // 刷新页面以更新统计信息
-            window.location.reload();
-        } catch (error) {
-            alert('批量删除失败: ' + error.message);
-        }
-      });
-
+      // 分享二维码功能
       let currentShareUrl = '';
       function showQRCode(url) {
         currentShareUrl = url;
@@ -1365,80 +1272,119 @@ function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
       }   
 
       function handleCopyUrl() {
-        copyText(currentShareUrl, document.querySelector('.qr-copy'));
-      }
-      
-      function copyText(text, element) {
-        navigator.clipboard.writeText(text).then(() => {
-            if (element) {
-                const originalText = element.textContent;
-                element.textContent = '✔ 已复制';
-                element.disabled = true;
-                setTimeout(() => {
-                    element.textContent = originalText;
-                    element.disabled = false;
-                }, 2000);
-            } else {
-                alert('已复制到剪贴板');
-            }
-        }).catch(err => alert('复制失败'));
+        navigator.clipboard.writeText(currentShareUrl).then(() => alert('链接已复制'));
       }
 
-      function closeQRModal() { document.getElementById('qrModal').style.display = 'none'; }      
+      function closeQRModal() {
+        document.getElementById('qrModal').style.display = 'none';
+      }      
       window.onclick = (event) => {
         const modal = document.getElementById('qrModal');
         if (event.target === modal) modal.style.display = 'none';
       }
 
+      // 单个文件删除功能
       async function deleteFile(url) {
         if (!confirm('确定要删除这个文件吗？')) return;
+        await performDelete([url]);
+      }
+
+      // --- 新增：全选和批量删除逻辑 ---
+      const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+      const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
+      const fileCheckboxes = document.querySelectorAll('.file-checkbox');
+
+      function updateSelectionState() {
+        const selectedCheckboxes = document.querySelectorAll('.file-checkbox:checked');
+        const allCheckboxes = document.querySelectorAll('.file-checkbox');
         
+        if (selectedCheckboxes.length > 0) {
+          deleteSelectedBtn.style.display = 'inline-block';
+          deleteSelectedBtn.textContent = \`删除选中 (\${selectedCheckboxes.length})\`;
+        } else {
+          deleteSelectedBtn.style.display = 'none';
+        }
+
+        if (allCheckboxes.length > 0) {
+            if (selectedCheckboxes.length === allCheckboxes.length) {
+                selectAllCheckbox.checked = true;
+                selectAllCheckbox.indeterminate = false;
+            } else if (selectedCheckboxes.length > 0) {
+                selectAllCheckbox.checked = false;
+                selectAllCheckbox.indeterminate = true;
+            } else {
+                selectAllCheckbox.checked = false;
+                selectAllCheckbox.indeterminate = false;
+            }
+        }
+
+        // 更新卡片样式
+        fileCheckboxes.forEach(cb => {
+            cb.closest('.file-card').classList.toggle('selected', cb.checked);
+        });
+      }
+
+      selectAllCheckbox.addEventListener('change', (e) => {
+        fileCheckboxes.forEach(checkbox => {
+          checkbox.checked = e.target.checked;
+        });
+        updateSelectionState();
+      });
+
+      fileCheckboxes.forEach(checkbox => {
+        checkbox.addEventListener('change', updateSelectionState);
+      });
+
+      deleteSelectedBtn.addEventListener('click', async () => {
+        const selectedUrls = Array.from(document.querySelectorAll('.file-checkbox:checked'))
+          .map(cb => cb.closest('.file-card').dataset.url);
+        
+        if (selectedUrls.length === 0) {
+          alert('请先选择要删除的文件');
+          return;
+        }
+
+        if (!confirm(\`确定要删除选中的 \${selectedUrls.length} 个文件吗？\n此操作不可恢复！\`)) return;
+        
+        await performDelete(selectedUrls);
+      });
+      
+      async function performDelete(urls) {
         try {
           const response = await fetch('/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url })
+            body: JSON.stringify({ urls })
           });
-          const result = await response.json();
-          if (!response.ok) throw new Error(result.error || '删除失败');
+
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || '删除请求失败');
+          }
           
-          const card = document.querySelector(\`[data-url="\${url}"]\`);
-          if (card) card.remove();
-          alert(result.message || '文件删除成功');
-          window.location.reload();
+          const resultData = await response.json();
+          let successCount = 0;
+          resultData.results.forEach(res => {
+              if(res.success) {
+                  const card = document.querySelector(\`[data-url="\${res.url}"]\`);
+                  if (card) card.remove();
+                  successCount++;
+              } else {
+                  console.error(\`删除 \${res.url} 失败: \`, res.error);
+              }
+          });
+          alert(\`删除操作完成: \${successCount}个成功, \${urls.length - successCount}个失败。\`);
+
         } catch (error) {
-          alert('文件删除失败: ' + error.message);
+          alert('删除失败: ' + error.message);
+        } finally {
+            updateSelectionState();
         }
       }
+      
+      // 初始化状态
+      updateSelectionState();
     </script>
   </body>
   </html>`;
-}
-
-function generatePasswordPromptPage(url) {
-    return `<!DOCTYPE html>
-    <html lang="zh-CN">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>需要密码</title>
-        <style>
-            body { display: flex; justify-content: center; align-items: center; height: 100vh; font-family: Arial, sans-serif; background: #f0f2f5; }
-            .prompt-container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); text-align: center; }
-            h2 { margin-bottom: 20px; }
-            input { width: 100%; padding: 10px; margin-bottom: 20px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-            button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
-            button:hover { background: #0056b3; }
-        </style>
-    </head>
-    <body>
-        <div class="prompt-container">
-            <h2>请输入密码访问文件</h2>
-            <form action="${url}" method="GET">
-                <input type="password" name="password" placeholder="请输入密码" required>
-                <button type="submit">确认</button>
-            </form>
-        </div>
-    </body>
-    </html>`;
 }
