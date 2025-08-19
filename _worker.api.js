@@ -61,6 +61,8 @@ const templates = {
             .upload-area:hover { background-color: #f8f9fa; }
             .upload-area p { margin: 0; font-size: 18px; color: #555; }
             #file-input { display: none; }
+            .password-input { margin-top: 20px; }
+            .password-input input { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
             .progress-bar { width: 100%; background-color: #e9ecef; border-radius: 4px; margin-top: 20px; display: none; }
             .progress { width: 0; height: 20px; background-color: #28a745; border-radius: 4px; text-align: center; color: white; line-height: 20px; }
             .result { margin-top: 20px; }
@@ -84,6 +86,9 @@ const templates = {
                 <p>点击或拖拽文件到此区域上传</p>
                 <p id="file-limit-info"></p>
             </div>
+            <div class="password-input">
+                <input type="text" id="password" placeholder="设置访问密码 (可选)">
+            </div>
             <input type="file" id="file-input">
             <div class="progress-bar" id="progress-bar">
                 <div class="progress" id="progress">0%</div>
@@ -97,6 +102,7 @@ const templates = {
         <script>
             const uploadArea = document.getElementById('upload-area');
             const fileInput = document.getElementById('file-input');
+            const passwordInput = document.getElementById('password');
             const progressBar = document.getElementById('progress-bar');
             const progress = document.getElementById('progress');
             const resultDiv = document.getElementById('result');
@@ -128,6 +134,7 @@ const templates = {
             function uploadFile(file) {
                 const formData = new FormData();
                 formData.append('file', file);
+                formData.append('password', passwordInput.value);
 
                 progressBar.style.display = 'block';
                 progress.style.width = '0%';
@@ -184,6 +191,7 @@ const templates = {
             .admin-header { background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
             .stats, .actions, .search-box { display: flex; align-items: center; gap: 15px; }
             .stats span { font-size: 14px; color: #555; background: #f0f2f5; padding: 5px 10px; border-radius: 5px; }
+            .stats .important-stat { color: red; font-weight: bold; font-size: 1.1em; }
             .actions label { display: flex; align-items: center; cursor: pointer; }
             .btn { padding: 8px 12px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; text-align: center; }
             .btn-danger { background-color: #dc3545; color: white; }
@@ -197,15 +205,20 @@ const templates = {
             .file-info { padding: 10px; flex-grow: 1; }
             .file-info div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: #666; margin-bottom: 5px; }
             .file-info div:first-child { font-weight: bold; color: #333; }
+            .password-info { cursor: pointer; }
             .file-actions { display: flex; justify-content: space-around; padding: 10px; border-top: 1px solid #eee; }
             .file-actions .btn { flex: 1; margin: 0 5px; padding: 6px; font-size: 12px; }
             .btn-copy { background-color: #28a745; color: white; }
+            .btn-edit { background-color: #17a2b8; color: white; }
             .btn-down { background-color: #007bff; color: white; }
             .btn-delete { background-color: #ffc107; color: #212529; }
-            .qr-modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); justify-content: center; align-items: center; }
-            .qr-content { background: white; padding: 20px; border-radius: 8px; text-align: center; }
+            .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); justify-content: center; align-items: center; }
+            .modal-content { background: white; padding: 20px; border-radius: 8px; text-align: center; }
             #qrcode { padding: 10px; }
-            .qr-buttons { margin-top: 15px; }
+            .qr-link-container { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 10px; }
+            .qr-link-container a { color: #007bff; }
+            .modal-buttons { margin-top: 15px; }
+            .edit-modal-content input { width: 90%; padding: 8px; margin-bottom: 10px; }
             /* Custom Alert/Confirm Modal */
             .custom-modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 2000; opacity: 0; pointer-events: none; transition: opacity 0.3s; }
             .custom-modal-overlay.active { opacity: 1; pointer-events: auto; }
@@ -227,8 +240,8 @@ const templates = {
         <div class="container">
             <div class="admin-header">
                 <div class="stats">
-                    <span>文件总数: {{totalFiles}}</span>
-                    <span>总大小: {{totalSize}}</span>
+                    <span class="important-stat">文件总数: {{totalFiles}}</span>
+                    <span class="important-stat">总大小: {{totalSize}}</span>
                 </div>
                 <div class="actions">
                     <label><input type="checkbox" id="selectAllCheckbox"> 全选</label>
@@ -244,7 +257,7 @@ const templates = {
             </div>
         </div>
         
-        {{{QR_MODAL}}}
+        {{{MODALS}}}
 
         <!-- Custom Alert/Confirm Modal Structure -->
         <div id="custom-modal-overlay" class="custom-modal-overlay">
@@ -257,47 +270,82 @@ const templates = {
         <script>
             let currentUrlToCopy = '';
             const qrModal = document.getElementById('qrModal');
+            const editModal = document.getElementById('editModal');
             const qrcodeContainer = document.getElementById('qrcode');
+            const qrLink = document.getElementById('qrLink');
             let qrcode = new QRCode(qrcodeContainer, { width: 200, height: 200 });
 
             function showQRCode(url) {
                 currentUrlToCopy = url;
                 qrcode.makeCode(url);
+                qrLink.href = url;
+                qrLink.textContent = url;
                 qrModal.style.display = 'flex';
             }
-
-            function closeQRModal() {
-                qrModal.style.display = 'none';
-                qrcode.clear();
+            
+            function showEditModal(url, currentName, currentPassword) {
+                document.getElementById('edit-url').value = url;
+                document.getElementById('edit-name').value = currentName;
+                document.getElementById('edit-password').value = currentPassword || '';
+                editModal.style.display = 'flex';
             }
 
-            function handleCopyUrl() {
-                navigator.clipboard.writeText(currentUrlToCopy).then(() => {
-                    showCustomAlert('链接已复制到剪贴板');
-                    closeQRModal();
+            function closeModal(modalId) {
+                document.getElementById(modalId).style.display = 'none';
+                if (modalId === 'qrModal') qrcode.clear();
+            }
+
+            function copyToClipboard(text, message) {
+                 navigator.clipboard.writeText(text).then(() => {
+                    showCustomAlert(message || '已复制到剪贴板');
                 }, () => {
                     showCustomAlert('复制失败');
                 });
             }
 
-            // --- 新增功能: 弹窗、全选和批量删除 ---
+            async function handleUpdateFile() {
+                const url = document.getElementById('edit-url').value;
+                const newName = document.getElementById('edit-name').value;
+                const newPassword = document.getElementById('edit-password').value;
+                
+                try {
+                    const response = await fetch('/update', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url, newName, newPassword })
+                    });
+                    const result = await response.json();
+                    if (response.ok && result.success) {
+                        showCustomAlert('更新成功').then(() => location.reload());
+                    } else {
+                        throw new Error(result.error || '更新失败');
+                    }
+                } catch (error) {
+                    showCustomAlert('更新失败: ' + error.message);
+                }
+            }
+
+            // --- Custom Modal Functions ---
             const modalOverlay = document.getElementById('custom-modal-overlay');
             const modal = document.getElementById('custom-modal');
             const modalMessage = document.getElementById('custom-modal-message');
             const modalButtons = document.getElementById('custom-modal-buttons');
 
             function showCustomAlert(message) {
-                modalMessage.textContent = message;
-                modalButtons.innerHTML = '<button class="modal-btn-ok">确定</button>';
-                modalOverlay.classList.add('active');
-                modal.classList.add('active');
+                return new Promise(resolve => {
+                    modalMessage.textContent = message;
+                    modalButtons.innerHTML = '<button class="modal-btn-ok">确定</button>';
+                    modalOverlay.classList.add('active');
+                    modal.classList.add('active');
 
-                modalButtons.querySelector('.modal-btn-ok').onclick = () => {
-                    modalOverlay.classList.remove('active');
-                    modal.classList.remove('active');
-                };
+                    modalButtons.querySelector('.modal-btn-ok').onclick = () => {
+                        modalOverlay.classList.remove('active');
+                        modal.classList.remove('active');
+                        resolve();
+                    };
+                });
             }
-
+            
             function showCustomConfirm(message) {
                 return new Promise(resolve => {
                     modalMessage.textContent = message;
@@ -318,8 +366,8 @@ const templates = {
                 });
             }
             
-            async function deleteFile(url, isBatch = false) {
-                const confirmed = isBatch ? true : await showCustomConfirm('确定要删除这个文件吗？');
+            async function deleteFile(url) {
+                const confirmed = await showCustomConfirm('确定要删除这个文件吗？');
                 if (confirmed) {
                     try {
                         const response = await fetch('/delete', {
@@ -329,16 +377,12 @@ const templates = {
                         });
                         const result = await response.json();
                         if (response.ok && result.success) {
-                            if (!isBatch) {
-                                showCustomAlert('删除成功').then(() => location.reload());
-                            }
+                            showCustomAlert('删除成功').then(() => location.reload());
                         } else {
                             throw new Error(result.error || '删除失败');
                         }
                     } catch (error) {
-                        if (!isBatch) {
-                            showCustomAlert('删除失败: ' + error.message);
-                        }
+                        showCustomAlert('删除失败: ' + error.message);
                     }
                 }
             }
@@ -383,26 +427,7 @@ const templates = {
             // 搜索功能
             const performSearch = async () => {
                 const query = document.getElementById('searchInput').value;
-                if (!query) {
-                    location.reload();
-                    return;
-                }
-                try {
-                    const response = await fetch('/search', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ query })
-                    });
-                    const result = await response.json();
-                    const fileGrid = document.getElementById('fileGrid');
-                    if (response.ok) {
-                        fileGrid.innerHTML = result.files.map(file => createFileCard(file)).join('');
-                    } else {
-                        throw new Error(result.error || '搜索失败');
-                    }
-                } catch (error) {
-                    showCustomAlert('搜索失败: ' + error.message);
-                }
+                location.href = \`/admin?search=\${encodeURIComponent(query)}\`;
             };
 
             document.getElementById('searchBtn').addEventListener('click', performSearch);
@@ -411,47 +436,36 @@ const templates = {
                     performSearch();
                 }
             });
-
-            function createFileCard(file) {
-                const fileName = file.file_name;
-                const fileSize = formatSize(file.file_size || 0);
-                const createdAt = new Date(file.created_at).toISOString().replace('T', ' ').split('.')[0];
-                return \`
-                    <div class="file-card" data-url="\${file.url}">
-                        <div class="file-select">
-                            <input type="checkbox" class="file-checkbox" data-url="\${file.url}">
-                        </div>
-                        <div class="file-preview">\${getPreviewHtml(file.url)}</div>
-                        <div class="file-info">
-                            <div>\${fileName}</div>
-                            <div>\${fileSize}</div>
-                            <div>\${createdAt}</div>
-                        </div>
-                        <div class="file-actions">
-                            <button class="btn btn-copy" onclick="showQRCode('\${file.url}')">分享</button>
-                            <a class="btn btn-down" href="\${file.url}" download="\${fileName}">下载</a>
-                            <button class="btn btn-delete" onclick="deleteFile('\${file.url}')">删除</button>
-                        </div>
-                    </div>
-                \`;
-            }
-            function formatSize(bytes) {
-                if (bytes === 0) return '0 B';
-                const units = ['B', 'KB', 'MB', 'GB'];
-                const i = Math.floor(Math.log(bytes) / Math.log(1024));
-                return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${units[i]}\`;
-            }
-            function getPreviewHtml(url) {
-                const ext = (url.split('.').pop() || '').toLowerCase();
-                const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico'].includes(ext);
-                const isVideo = ['mp4', 'webm'].includes(ext);
-                const isAudio = ['mp3', 'wav', 'ogg'].includes(ext);
-                if (isImage) return \`<img src="\${url}" alt="预览" loading="lazy">\`;
-                if (isVideo) return \`<video src="\${url}" controls></video>\`;
-                if (isAudio) return \`<audio src="\${url}" controls></audio>\`;
-                return \`<div style="font-size: 48px">📄</div>\`;
-            }
         </script>
+    </body>
+    </html>
+  `,
+  'password.html': `
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>需要密码</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f7f6; }
+            .container { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); text-align: center; }
+            h1 { color: #333; }
+            p { color: #d9534f; }
+            input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
+            button { width: 100%; padding: 12px; background-color: #007bff; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; }
+            button:hover { background-color: #0056b3; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>请输入密码访问文件</h1>
+            <form method="GET">
+                <input type="password" name="password" placeholder="密码" required>
+                <button type="submit">确认</button>
+            </form>
+            {{ERROR_MESSAGE}}
+        </div>
     </body>
     </html>
   `
@@ -477,7 +491,8 @@ async function initDatabase(config) {
       created_at TEXT NOT NULL,
       file_name TEXT,
       file_size INTEGER,
-      mime_type TEXT
+      mime_type TEXT,
+      password TEXT
     )
   `).run();
 }
@@ -502,7 +517,9 @@ export default {
     // 初始化数据库
     await initDatabase(config);
     // 路由处理
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
+    const { pathname } = url;
+    
     if (pathname === '/config') {
       const safeConfig = { maxSizeMB: config.maxSizeMB };
       return new Response(JSON.stringify(safeConfig), {
@@ -516,7 +533,7 @@ export default {
       '/upload': () => handleUploadRequest(request, config),
       '/admin': () => handleAdminRequest(request, config),
       '/delete': () => handleDeleteRequest(request, config),
-      '/search': () => handleSearchRequest(request, config),
+      '/update': () => handleUpdateRequest(request, config),
       '/bing': () => handleBingImagesRequest(request, config)
     };
     const handler = routes[pathname];
@@ -615,6 +632,7 @@ async function handleUploadRequest(request, config) {
   try {
     const formData = await request.formData();
     const file = formData.get('file');
+    const password = formData.get('password');
     if (!file) throw new Error('未找到文件');
     if (file.size > config.maxSizeMB * 1024 * 1024) throw new Error(`文件超过${config.maxSizeMB}MB限制`);
     
@@ -659,8 +677,8 @@ async function handleUploadRequest(request, config) {
     const url = `https://${config.domain}/${time}.${ext}`;
     
     await config.database.prepare(`
-      INSERT INTO files (url, fileId, message_id, created_at, file_name, file_size, mime_type) 
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO files (url, fileId, message_id, created_at, file_name, file_size, mime_type, password) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       url,
       fileId,
@@ -668,7 +686,8 @@ async function handleUploadRequest(request, config) {
       timestamp,
       file.name,
       file.size,
-      file.type || getContentType(ext)
+      file.type || getContentType(ext),
+      password || null
     ).run();
 
     return new Response(
@@ -694,15 +713,23 @@ async function handleAdminRequest(request, config) {
     return Response.redirect(`${new URL(request.url).origin}/`, 302);
   }
 
-  const files = await config.database.prepare(
-    `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type
-    FROM files
-    ORDER BY created_at DESC`
-  ).all();
+  const url = new URL(request.url);
+  const searchQuery = url.searchParams.get('search');
+  
+  let files;
+  if (searchQuery) {
+    const searchPattern = `%${searchQuery}%`;
+    files = await config.database.prepare(
+      `SELECT * FROM files WHERE file_name LIKE ? COLLATE NOCASE ORDER BY created_at DESC`
+    ).bind(searchPattern).all();
+  } else {
+    files = await config.database.prepare(
+      `SELECT * FROM files ORDER BY created_at DESC`
+    ).all();
+  }
 
   const fileList = files.results || [];
   
-  // 新增：计算统计数据
   const totalFiles = fileList.length;
   const totalSize = fileList.reduce((sum, file) => sum + (file.file_size || 0), 0);
   const formattedTotalSize = formatSize(totalSize);
@@ -711,6 +738,8 @@ async function handleAdminRequest(request, config) {
     const fileName = file.file_name;
     const fileSize = formatSize(file.file_size || 0);
     const createdAt = new Date(file.created_at).toISOString().replace('T', ' ').split('.')[0];
+    const passwordDisplay = file.password ? `<div class="password-info" onclick="copyToClipboard('${file.password}', '密码已复制')">密码: ${file.password}</div>` : '<div>无密码</div>';
+    
     return `
       <div class="file-card" data-url="${file.url}">
         <div class="file-select">
@@ -723,9 +752,11 @@ async function handleAdminRequest(request, config) {
           <div>${fileName}</div>
           <div>${fileSize}</div>
           <div>${createdAt}</div>
+          ${passwordDisplay}
         </div>
         <div class="file-actions">
           <button class="btn btn-copy" onclick="showQRCode('${file.url}')">分享</button>
+          <button class="btn btn-edit" onclick="showEditModal('${file.url}', '${fileName}', '${file.password || ''}')">编辑</button>
           <a class="btn btn-down" href="${file.url}" download="${fileName}">下载</a>
           <button class="btn btn-delete" onclick="deleteFile('${file.url}')">删除</button>
         </div>
@@ -733,54 +764,67 @@ async function handleAdminRequest(request, config) {
     `;
   }).join('');
 
-  const qrModal = `
-    <div id="qrModal" class="qr-modal">
-      <div class="qr-content">
+  const modals = `
+    <div id="qrModal" class="modal">
+      <div class="modal-content">
         <div id="qrcode"></div>
-        <div class="qr-buttons">
-          <button class="btn btn-copy" onclick="handleCopyUrl()">复制链接</button>
-          <button class="btn btn-delete" onclick="closeQRModal()">关闭</button>
+        <div class="qr-link-container">
+           <a id="qrLink" href="#" target="_blank"></a>
+           <button class="btn btn-copy" onclick="copyToClipboard(currentUrlToCopy, '链接已复制')">复制</button>
+        </div>
+        <div class="modal-buttons">
+          <button class="btn btn-delete" onclick="closeModal('qrModal')">关闭</button>
         </div>
       </div>
     </div>
+    <div id="editModal" class="modal">
+        <div class="modal-content edit-modal-content">
+            <h3>编辑文件信息</h3>
+            <input type="hidden" id="edit-url">
+            <input type="text" id="edit-name" placeholder="文件名">
+            <input type="text" id="edit-password" placeholder="新密码 (留空则无密码)">
+            <div class="modal-buttons">
+                <button class="btn btn-down" onclick="handleUpdateFile()">保存</button>
+                <button class="btn btn-delete" onclick="closeModal('editModal')">取消</button>
+            </div>
+        </div>
+    </div>
   `;
 
-  const html = await generateAdminPage(fileCards, qrModal, totalFiles, formattedTotalSize);
+  const html = await generateAdminPage(fileCards, modals, totalFiles, formattedTotalSize);
   return new Response(html, {
     headers: { 'Content-Type': 'text/html;charset=UTF-8' }
   });
 }
 
-// 处理文件搜索
-async function handleSearchRequest(request, config) {
-  if (config.enableAuth && !authenticate(request, config)) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
-  }
+// 处理文件信息更新
+async function handleUpdateRequest(request, config) {
+    if (config.enableAuth && !authenticate(request, config)) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+    }
+    if (request.method !== 'POST') {
+        return new Response('Method Not Allowed', { status: 405 });
+    }
+    try {
+        const { url, newName, newPassword } = await request.json();
+        if (!url || !newName) {
+            throw new Error('缺少必要参数');
+        }
 
-  try {
-    const { query } = await request.json();
-    const searchPattern = `%${query}%`;    
-    const files = await config.database.prepare(
-      `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type
-       FROM files 
-       WHERE file_name LIKE ?
-       COLLATE NOCASE
-       ORDER BY created_at DESC`
-    ).bind(searchPattern).all();
+        await config.database.prepare(
+            `UPDATE files SET file_name = ?, password = ? WHERE url = ?`
+        ).bind(newName, newPassword || null, url).run();
 
-    return new Response(
-      JSON.stringify({ files: files.results || [] }),
-      { headers: { 'Content-Type': 'application/json' }}
-    );
+        return new Response(JSON.stringify({ success: true, message: '更新成功' }), {
+            headers: { 'Content-Type': 'application/json' }
+        });
 
-  } catch (error) {
-    console.error(`[Search Error] ${error.message}`);
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: 500, headers: { 'Content-Type': 'application/json' }}
-    );
-  }
+    } catch (error) {
+        console.error(`[Update Error] ${error.message}`);
+        return new Response(JSON.stringify({ error: error.message }), { status: 500 });
+    }
 }
+
 
 // 支持预览的文件类型
 function getPreviewHtml(url) {
@@ -802,21 +846,35 @@ function getPreviewHtml(url) {
 
 // 获取文件并缓存
 async function handleFileRequest(request, config) {
-  const url = request.url;
+  const url = new URL(request.url);
+  const requestUrl = `${url.origin}${url.pathname}`;
   const cache = caches.default;
-  const cacheKey = new Request(url, request);
+  const cacheKey = new Request(requestUrl, request);
 
   try {
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) return cachedResponse;
-
     const file = await config.database.prepare(
-      `SELECT fileId, file_name, mime_type FROM files WHERE url = ?`
-    ).bind(url).first();
+      `SELECT * FROM files WHERE url = ?`
+    ).bind(requestUrl).first();
 
     if (!file) {
       return new Response('文件不存在', { status: 404 });
     }
+
+    // 密码保护逻辑
+    if (file.password) {
+        const providedPassword = url.searchParams.get('password');
+        if (providedPassword !== file.password) {
+            const errorMessage = providedPassword ? '<p>密码错误，请重试。</p>' : '';
+            const passwordPage = await loadTemplate('password.html');
+            return new Response(render(passwordPage, { ERROR_MESSAGE: errorMessage }), {
+                status: 401,
+                headers: { 'Content-Type': 'text/html;charset=UTF-8' }
+            });
+        }
+    }
+
+    const cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) return cachedResponse;
 
     const tgResponse = await fetch(`https://api.telegram.org/bot${config.tgBotToken}/getFile?file_id=${file.fileId}`);
     if (!tgResponse.ok) throw new Error('获取TG文件信息失败');
@@ -831,7 +889,7 @@ async function handleFileRequest(request, config) {
 
     const response = new Response(fileResponse.body, {
       headers: {
-        'Content-Type': file.mime_type || getContentType(url.split('.').pop().toLowerCase()),
+        'Content-Type': file.mime_type || getContentType(requestUrl.split('.').pop().toLowerCase()),
         'Cache-Control': 'public, max-age=31536000',
         'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(file.file_name || '')}`
       }
@@ -841,7 +899,7 @@ async function handleFileRequest(request, config) {
     return response;
 
   } catch (error) {
-    console.error(`[File Request Error] ${error.message} for ${url}`);
+    console.error(`[File Request Error] ${error.message} for ${request.url}`);
     return new Response('服务器内部错误', { status: 500 });
   }
 }
@@ -955,12 +1013,12 @@ async function generateUploadPage() {
   });
 }
 
-async function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
+async function generateAdminPage(fileCards, modals, totalFiles, totalSize) {
   const baseHtml = await loadTemplate('admin.html');
   return render(baseHtml, {
     pageTitle: '文件管理',
     FILE_CARDS: fileCards,
-    QR_MODAL: qrModal,
+    MODALS: modals,
     totalFiles: totalFiles,
     totalSize: totalSize
   });
