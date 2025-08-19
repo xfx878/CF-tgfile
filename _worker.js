@@ -1,5 +1,7 @@
+// 由于tg的限制，虽然可以上传超过20M的文件，但无法返回直链地址
+// 因此修改代码，当文件大于20MB时，直接阻止上传
+
 // 数据库初始化函数
-// 新增: 添加 password 字段用于存储文件密码
 async function initDatabase(config) {
   await config.database.prepare(`
     CREATE TABLE IF NOT EXISTS files (
@@ -9,8 +11,7 @@ async function initDatabase(config) {
       created_at INTEGER NOT NULL,
       file_name TEXT,
       file_size INTEGER,
-      mime_type TEXT,
-      password TEXT
+      mime_type TEXT
     )
   `).run();
 }
@@ -49,8 +50,8 @@ export default {
       '/upload': () => handleUploadRequest(request, config),
       '/admin': () => handleAdminRequest(request, config),
       '/delete': () => handleDeleteRequest(request, config),
+      '/edit': () => handleEditRequest(request, config), // 新增编辑路由
       '/search': () => handleSearchRequest(request, config),
-      '/update': () => handleUpdateRequest(request, config), // 新增: 编辑文件信息路由
       '/bing': handleBingImagesRequest
     };
     const handler = routes[pathname];
@@ -149,7 +150,6 @@ async function handleUploadRequest(request, config) {
   try {
     const formData = await request.formData();
     const file = formData.get('file');
-    const password = formData.get('password'); // 新增: 获取密码
     if (!file) throw new Error('未找到文件');
     if (file.size > config.maxSizeMB * 1024 * 1024) throw new Error(`文件超过${config.maxSizeMB}MB限制`);
     
@@ -192,10 +192,9 @@ async function handleUploadRequest(request, config) {
     const timestamp = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
     const url = `https://${config.domain}/${time}.${ext}`;
     
-    // 新增: 在INSERT语句中加入 password
     await config.database.prepare(`
-      INSERT INTO files (url, fileId, message_id, created_at, file_name, file_size, mime_type, password) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO files (url, fileId, message_id, created_at, file_name, file_size, mime_type) 
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).bind(
       url,
       fileId,
@@ -203,8 +202,7 @@ async function handleUploadRequest(request, config) {
       timestamp,
       file.name,
       file.size,
-      file.type || getContentType(ext),
-      password || null // 如果密码为空则存为NULL
+      file.type || getContentType(ext)
     ).run();
 
     return new Response(
@@ -238,16 +236,15 @@ async function handleAdminRequest(request, config) {
     return Response.redirect(`${new URL(request.url).origin}/`, 302);
   }
 
-  // 新增: 查询时获取 password 字段
   const files = await config.database.prepare(
-    `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type, password
+    `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type
     FROM files
     ORDER BY created_at DESC`
   ).all();
 
   const fileList = files.results || [];
   
-  // 计算文件总数和总大小
+  // 新增：计算文件总数和总大小
   const totalFiles = fileList.length;
   const totalSize = fileList.reduce((sum, file) => sum + (file.file_size || 0), 0);
   const stats = {
@@ -259,27 +256,21 @@ async function handleAdminRequest(request, config) {
     const fileName = file.file_name;
     const fileSize = formatSize(file.file_size || 0);
     const createdAt = new Date(file.created_at).toISOString().replace('T', ' ').split('.')[0];
-    const hasPassword = file.password && file.password.length > 0;
-    
-    // 新增: 
-    // 1. 在卡片上添加 data-filename 和 data-password 属性，用于编辑功能
-    // 2. 显示密码信息，并添加点击复制功能
-    // 3. 在分享按钮右侧添加编辑按钮
+    // 文件预览信息和操作元素
     return `
-      <div class="file-card" data-url="${file.url}" data-filename="${file.file_name}" data-password="${file.password || ''}">
+      <div class="file-card" data-url="${file.url}">
         <input type="checkbox" class="file-checkbox">
         <div class="file-preview">
           ${getPreviewHtml(file.url)}
         </div>
         <div class="file-info">
-          <div class="file-name">${fileName}</div>
-          ${hasPassword ? `<div class="file-password" onclick="copyPassword('${file.password}', this)">密码: *** (点击复制)</div>` : '<div class="file-password" style="cursor: default;">无密码</div>'}
-          <div class="file-meta">${fileSize}</div>
-          <div class="file-meta">${createdAt}</div>
+          <div>${fileName}</div>
+          <div>${fileSize}</div>
+          <div>${createdAt}</div>
         </div>
         <div class="file-actions">
           <button class="btn btn-copy" onclick="showQRCode('${file.url}')">分享</button>
-          <button class="btn btn-edit" onclick="showEditModal('${file.url}')">编辑</button>
+          <button class="btn btn-edit" onclick="editFileName('${file.url}', '${fileName}')">编辑</button>
           <a class="btn btn-down" href="${file.url}" download="${fileName}">下载</a>
           <button class="btn btn-delete" onclick="deleteFile('${file.url}')">删除</button>
         </div>
@@ -287,43 +278,20 @@ async function handleAdminRequest(request, config) {
     `;
   }).join('');
 
-  // 新增: 
-  // 1. 二维码下方添加链接显示区域
-  // 2. 编辑文件信息的弹窗
-  const modals = `
-    <div id="qrModal" class="modal-overlay">
-      <div class="modal-content">
+  // 二维码分享元素
+  const qrModal = `
+    <div id="qrModal" class="qr-modal">
+      <div class="qr-content">
         <div id="qrcode"></div>
-        <div id="qrLinkContainer">
-          <a id="qrLink" href="#" target="_blank"></a>
-        </div>
-        <div class="modal-buttons">
-          <button class="btn" onclick="handleCopyUrl()">复制链接</button>
-          <button class="btn btn-close" onclick="closeAllModals()">关闭</button>
+        <div class="qr-buttons">
+          <button class="qr-copy" onclick="handleCopyUrl()">复制链接</button>
+          <button class="qr-close" onclick="closeQRModal()">关闭</button>
         </div>
       </div>
     </div>
-    <div id="editModal" class="modal-overlay">
-        <div class="modal-content">
-            <h3>编辑文件信息</h3>
-            <input type="hidden" id="editFileUrl">
-            <div class="form-group">
-                <label for="editFileName">文件名:</label>
-                <input type="text" id="editFileName">
-            </div>
-            <div class="form-group">
-                <label for="editFilePassword">密码:</label>
-                <input type="text" id="editFilePassword" placeholder="留空则无密码">
-            </div>
-            <div class="modal-buttons">
-                <button class="btn" onclick="saveFileChanges()">保存</button>
-                <button class="btn btn-close" onclick="closeAllModals()">取消</button>
-            </div>
-        </div>
-    </div>
   `;
 
-  const html = generateAdminPage(fileCards, modals, stats);
+  const html = generateAdminPage(fileCards, qrModal, stats);
   return new Response(html, {
     headers: { 'Content-Type': 'text/html;charset=UTF-8' }
   });
@@ -338,9 +306,8 @@ async function handleSearchRequest(request, config) {
   try {
     const { query } = await request.json();
     const searchPattern = `%${query}%`;    
-    // 新增: 查询时获取 password 字段
     const files = await config.database.prepare(
-      `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type, password
+      `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type
        FROM files 
        WHERE file_name LIKE ? ESCAPE '!'
        COLLATE NOCASE
@@ -381,20 +348,21 @@ function getPreviewHtml(url) {
 
 // 获取文件并缓存
 async function handleFileRequest(request, config) {
-  const url = request.url.split('?')[0]; // 忽略查询参数进行匹配
+  const url = request.url;
   const cache = caches.default;
   const cacheKey = new Request(url);
 
   try {
+    // 尝试从缓存获取
     const cachedResponse = await cache.match(cacheKey);
     if (cachedResponse) {
       console.log(`[Cache Hit] ${url}`);
       return cachedResponse;
     }
 
-    // 新增: 查询时获取 password 字段
+    // 从数据库查询文件
     const file = await config.database.prepare(
-      `SELECT fileId, message_id, file_name, mime_type, password
+      `SELECT fileId, message_id, file_name, mime_type
       FROM files WHERE url = ?`
     ).bind(url).first();
 
@@ -404,28 +372,6 @@ async function handleFileRequest(request, config) {
         status: 404,
         headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
       });
-    }
-
-    // 新增: 密码验证逻辑
-    if (file.password) {
-        let authorized = false;
-        const requestUrl = new URL(request.url);
-        const providedPasswordQuery = requestUrl.searchParams.get('pwd');
-
-        if (request.method === 'POST') {
-            const formData = await request.formData();
-            if (formData.get('password') === file.password) {
-                authorized = true;
-            } else {
-                return new Response(generatePasswordPromptPage(true), { status: 401, headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
-            }
-        } else if (providedPasswordQuery === file.password) {
-            authorized = true;
-        }
-
-        if (!authorized) {
-            return new Response(generatePasswordPromptPage(false), { status: 401, headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
-        }
     }
 
     // 获取 Telegram 文件路径
@@ -464,8 +410,10 @@ async function handleFileRequest(request, config) {
       });
     }
 
+    // 使用存储的 MIME 类型或根据扩展名判断
     const contentType = file.mime_type || getContentType(url.split('.').pop().toLowerCase());
 
+    // 创建响应并缓存
     const response = new Response(fileResponse.body, {
       headers: {
         'Content-Type': contentType,
@@ -488,6 +436,45 @@ async function handleFileRequest(request, config) {
     });
   }
 }
+
+// 新增：处理文件名修改请求
+async function handleEditRequest(request, config) {
+    if (config.enableAuth && !authenticate(request, config)) {
+        return new Response(JSON.stringify({ error: '未授权' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    try {
+        const { url, newName } = await request.json();
+        if (!url || !newName || newName.trim() === '') {
+            return new Response(JSON.stringify({ error: '无效的URL或文件名' }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        const result = await config.database.prepare(
+            'UPDATE files SET file_name = ? WHERE url = ?'
+        ).bind(newName, url).run();
+
+        if (result.changes > 0) {
+            return new Response(JSON.stringify({ success: true, message: '文件名修改成功' }), {
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } else {
+            return new Response(JSON.stringify({ error: '文件不存在或无需修改' }), {
+                status: 404,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+    } catch (error) {
+        console.error(`[Edit Error] ${error.message}`);
+        return new Response(JSON.stringify({ error: error.message }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+}
+
 
 // 处理文件删除
 async function handleDeleteRequest(request, config) {
@@ -550,32 +537,6 @@ async function handleDeleteRequest(request, config) {
   }
 }
 
-// 新增: 处理文件信息更新的函数
-async function handleUpdateRequest(request, config) {
-  if (config.enableAuth && !authenticate(request, config)) {
-    return new Response(JSON.stringify({ success: false, error: '未授权' }), { status: 401 });
-  }
-
-  try {
-    const { url, fileName, password } = await request.json();
-    if (!url || !fileName) {
-      return new Response(JSON.stringify({ success: false, error: '缺少必要参数' }), { status: 400 });
-    }
-
-    const result = await config.database.prepare(
-      'UPDATE files SET file_name = ?, password = ? WHERE url = ?'
-    ).bind(fileName, password || null, url).run();
-
-    if (result.meta.changes > 0) {
-      return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
-    } else {
-      return new Response(JSON.stringify({ success: false, error: '未找到文件或无需更新' }), { status: 404 });
-    }
-  } catch (error) {
-    console.error(`[Update Error] ${error.message}`);
-    return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500 });
-  }
-}
 
 // 支持上传的文件类型
 function getContentType(ext) {
@@ -589,6 +550,7 @@ function getContentType(ext) {
     json: 'application/json', xml: 'application/xml', ini: 'text/plain',
     js: 'application/javascript', yml: 'application/yaml', yaml: 'application/yaml',
     py: 'text/x-python', sh: 'application/x-sh',
+    // 添加更多办公和常见文件类型
     doc: 'application/msword',
     docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     xls: 'application/vnd.ms-excel',
@@ -650,40 +612,6 @@ function formatSize(bytes) {
       unitIndex++;
     }
     return `${size.toFixed(2)} ${units[unitIndex]}`;
-}
-
-// 新增: 生成密码输入页面的函数
-function generatePasswordPromptPage(isError) {
-    return `<!DOCTYPE html>
-    <html lang="zh-CN">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>需要密码</title>
-        <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f2f5; margin: 0; }
-            .container { background: white; padding: 2rem 3rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; }
-            h2 { margin-top: 0; color: #333; }
-            .form-group { margin: 1.5rem 0; }
-            input[type="password"] { width: 100%; padding: 0.8rem; border: 1px solid #ccc; border-radius: 4px; font-size: 1rem; box-sizing: border-box; }
-            button { width: 100%; padding: 0.8rem; background: #007bff; color: white; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer; transition: background-color 0.2s; }
-            button:hover { background: #0056b3; }
-            .error { color: #dc3545; margin-top: 1rem; font-size: 0.9rem; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <form method="POST">
-                <h2>请输入密码访问文件</h2>
-                <div class="form-group">
-                    <input type="password" name="password" placeholder="访问密码" required autofocus>
-                </div>
-                <button type="submit">确认</button>
-                ${isError ? '<p class="error">密码错误，请重试。</p>' : ''}
-            </form>
-        </div>
-    </body>
-    </html>`;
 }
 
 // 登录页面生成函数 /login
@@ -766,6 +694,7 @@ function generateLoginPage() {
       </form>
     </div>
     <script>
+      // 添加背景图相关函数
       async function setBingBackground() {
         try {
           const response = await fetch('/bing');
@@ -778,7 +707,9 @@ function generateLoginPage() {
           console.error('获取背景图失败:', error);
         }
       }
+      // 页面加载时设置背景图
       setBingBackground(); 
+      // 每小时更新一次背景图
       setInterval(setBingBackground, 3600000);
 
       document.getElementById('loginForm').addEventListener('submit', async (e) => {
@@ -860,17 +791,6 @@ function generateUploadPage() {
       .upload-area.dragover {
         border-color: #007bff;
         background: #f8f9fa;
-      }
-      .password-area {
-        margin-top: 15px;
-        text-align: center;
-      }
-      .password-area input {
-        padding: 8px;
-        border-radius: 4px;
-        border: 1px solid #ddd;
-        width: 50%;
-        background: rgba(255, 255, 255, 0.5);
       }
       .preview-area {
         margin-top: 20px;
@@ -979,10 +899,6 @@ function generateUploadPage() {
         <p>点击选择 或 拖拽文件到此处</p>
         <input type="file" id="fileInput" multiple style="display: none">
       </div>
-      <!-- 新增: 密码输入框 -->
-      <div class="password-area">
-        <input type="password" id="filePassword" placeholder="可选：为文件设置访问密码">
-      </div>
       <div class="preview-area" id="previewArea"></div>
       <div class="url-area">
         <textarea id="urlArea" readonly placeholder="上传完成后的链接将显示在这里"></textarea>
@@ -1003,6 +919,7 @@ function generateUploadPage() {
     </div>
 
     <script>
+      // 添加背景图相关函数
       async function setBingBackground() {
         try {
           const response = await fetch('/bing');
@@ -1015,7 +932,9 @@ function generateUploadPage() {
           console.error('获取背景图失败:', error);
         }
       }
+      // 页面加载时设置背景图
       setBingBackground(); 
+      // 每小时更新一次背景图
       setInterval(setBingBackground, 3600000);
 
       const uploadArea = document.getElementById('uploadArea');
@@ -1078,11 +997,12 @@ function generateUploadPage() {
         const config = await response.json();
         const files = Array.from(e.target.files);
         for (let file of files) {
+          // 直接在上传前进行大小判断
           if (file.size > config.maxSizeMB * 1024 * 1024) {
             alert(\`文件 \${file.name} 超过\${config.maxSizeMB}MB限制\`);
-            continue;
+            continue; // 跳过这个文件，继续处理下一个
           }
-          await uploadFile(file);
+          await uploadFile(file); // 继续上传
         }
       }
 
@@ -1124,11 +1044,6 @@ function generateUploadPage() {
 
         const formData = new FormData();
         formData.append('file', file);
-        // 新增: 将密码添加到表单数据中
-        const password = document.getElementById('filePassword').value;
-        if (password) {
-            formData.append('password', password);
-        }
         xhr.open('POST', '/upload');
         xhr.send(formData);
       }
@@ -1200,7 +1115,7 @@ function generateUploadPage() {
 }
 
 // 生成文件管理页面 /admin
-function generateAdminPage(fileCards, modals, stats) {
+function generateAdminPage(fileCards, qrModal, stats) {
   return `<!DOCTYPE html>
   <html lang="zh-CN">
   <head>
@@ -1241,10 +1156,9 @@ function generateAdminPage(fileCards, modals, stats) {
         gap: 20px;
       }
       h2 { margin: 0; }
-      /* 新增: 文件统计信息样式 */
       #stats { 
         color: red; 
-        font-weight: bold; 
+        font-weight: bold;
         font-size: 1.1em;
       }
       .header-right {
@@ -1276,8 +1190,6 @@ function generateAdminPage(fileCards, modals, stats) {
         overflow: hidden;
         position: relative;
         transition: transform 0.2s, box-shadow 0.2s;
-        display: flex;
-        flex-direction: column;
       }
       .file-card.selected {
         transform: translateY(-5px);
@@ -1299,21 +1211,14 @@ function generateAdminPage(fileCards, modals, stats) {
         padding: 10px;
         font-size: 14px;
         word-break: break-all;
-        flex-grow: 1;
       }
-      .file-name { font-weight: bold; color: #333; margin-bottom: 4px; }
-      .file-meta { font-size: 12px; color: #666; margin-bottom: 4px; }
-      .file-password { font-size: 12px; color: #6c757d; cursor: pointer; margin-bottom: 4px; }
-      .file-password:hover { color: #007bff; }
       .file-actions {
         padding: 10px;
         border-top: 1px solid #eee;
         display: flex;
-        justify-content: flex-end;
+        justify-content: space-around;
         align-items: center;
-        gap: 5px;
         font-size: 12px;
-        flex-wrap: wrap;
       }
       .file-checkbox {
         position: absolute;
@@ -1327,32 +1232,27 @@ function generateAdminPage(fileCards, modals, stats) {
         border: none;
         border-radius: 4px;
         cursor: pointer;
-        background: #007bff; 
-        color: white;
       }
-      .btn-delete { background: #dc3545; }
+      .btn-delete { background: #dc3545; color: white; }
+      .btn-copy { background: #007bff; color: white; }
       .btn-edit { background: #ffc107; color: black; }
-      .btn-down { background: #28a745; text-decoration: none; }
-      .btn-close { background: #6c757d; }
-      /* 新增: 弹窗样式 */
-      .modal-overlay {
+      .btn-down { background: #28a745; color: white; text-decoration: none; }
+      .qr-modal {
         display: none; position: fixed; top: 0; left: 0;
         width: 100%; height: 100%;
         background: rgba(0, 0, 0, 0.5);
         justify-content: center; align-items: center; z-index: 1000;
       }
-      .modal-content {
+      .qr-content {
         background: white; padding: 20px; border-radius: 10px;
         text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-        width: 90%; max-width: 400px;
       }
-      #qrcode { margin: 15px 0; }
-      #qrLinkContainer { margin-top: 15px; text-align: center; }
-      #qrLinkContainer a { word-break: break-all; color: #007bff; }
-      .modal-buttons { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }
-      .modal-content .form-group { text-align: left; margin-bottom: 15px; }
-      .modal-content .form-group label { display: block; margin-bottom: 5px; }
-      .modal-content .form-group input { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+      #qrcode { margin: 5px 0; }
+      .qr-buttons { display: flex; gap: 10px; justify-content: center; margin-top: 15px; }
+      .qr-copy, .qr-close {
+        padding: 8px 20px; background: #007bff; color: white;
+        border: none; border-radius: 5px; cursor: pointer;
+      }
     </style>
   </head>
   <body>
@@ -1372,11 +1272,12 @@ function generateAdminPage(fileCards, modals, stats) {
       <div class="grid" id="fileGrid">
         ${fileCards}
       </div>
-      ${modals}
+      ${qrModal}
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/qrcodejs/qrcode.min.js"></script>
     <script>
+      // 添加背景图相关函数
       async function setBingBackground() {
         try {
           const response = await fetch('/bing');
@@ -1389,7 +1290,9 @@ function generateAdminPage(fileCards, modals, stats) {
           console.error('获取背景图失败:', error);
         }
       }
+      // 页面加载时设置背景图
       setBingBackground(); 
+      // 每小时更新一次背景图
       setInterval(setBingBackground, 3600000);
 
       const searchInput = document.getElementById('searchInput');
@@ -1398,7 +1301,7 @@ function generateAdminPage(fileCards, modals, stats) {
       searchInput.addEventListener('input', (e) => {
         const searchTerm = e.target.value.toLowerCase();
         document.querySelectorAll('.file-card').forEach(card => {
-          const fileName = card.querySelector('.file-name').textContent.toLowerCase();
+          const fileName = card.querySelector('.file-info div:first-child').textContent.toLowerCase();
           card.style.display = fileName.includes(searchTerm) ? '' : 'none';
         });
       });
@@ -1409,11 +1312,8 @@ function generateAdminPage(fileCards, modals, stats) {
         currentShareUrl = url;
         const modal = document.getElementById('qrModal');
         const qrcodeDiv = document.getElementById('qrcode');
-        const qrLink = document.getElementById('qrLink');
         qrcodeDiv.innerHTML = '';
         new QRCode(qrcodeDiv, { text: url, width: 200, height: 200 });
-        qrLink.href = url;
-        qrLink.textContent = url;
         modal.style.display = 'flex';
       }   
 
@@ -1421,19 +1321,45 @@ function generateAdminPage(fileCards, modals, stats) {
         navigator.clipboard.writeText(currentShareUrl).then(() => alert('链接已复制'));
       }
 
-      function closeAllModals() {
-        document.querySelectorAll('.modal-overlay').forEach(modal => modal.style.display = 'none');
+      function closeQRModal() {
+        document.getElementById('qrModal').style.display = 'none';
       }      
       window.onclick = (event) => {
-        if (event.target.classList.contains('modal-overlay')) {
-            closeAllModals();
-        }
+        const modal = document.getElementById('qrModal');
+        if (event.target === modal) modal.style.display = 'none';
       }
 
       // 单个文件删除功能
       async function deleteFile(url) {
         if (!confirm('确定要删除这个文件吗？')) return;
         await performDelete([url]);
+      }
+      
+      // 新增：编辑文件名功能
+      async function editFileName(url, currentName) {
+        const newName = prompt('请输入新的文件名:', currentName);
+        if (newName && newName.trim() !== '' && newName !== currentName) {
+            try {
+                const response = await fetch('/edit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, newName })
+                });
+                const result = await response.json();
+                if (response.ok && result.success) {
+                    alert('文件名修改成功');
+                    const card = document.querySelector(\`[data-url="\${url}"]\`);
+                    if (card) {
+                        card.querySelector('.file-info div:first-child').textContent = newName;
+                        card.querySelector('.btn-down').setAttribute('download', newName);
+                    }
+                } else {
+                    throw new Error(result.error || '修改失败');
+                }
+            } catch (error) {
+                alert('修改失败: ' + error.message);
+            }
+        }
       }
 
       // --- 全选和批量删除逻辑 ---
@@ -1445,33 +1371,53 @@ function generateAdminPage(fileCards, modals, stats) {
         const selectedCheckboxes = document.querySelectorAll('.file-checkbox:checked');
         const allCheckboxes = document.querySelectorAll('.file-checkbox');
         
-        deleteSelectedBtn.style.display = selectedCheckboxes.length > 0 ? 'inline-block' : 'none';
         if (selectedCheckboxes.length > 0) {
-            deleteSelectedBtn.textContent = \`删除选中 (\${selectedCheckboxes.length})\`;
+          deleteSelectedBtn.style.display = 'inline-block';
+          deleteSelectedBtn.textContent = \`删除选中 (\${selectedCheckboxes.length})\`;
+        } else {
+          deleteSelectedBtn.style.display = 'none';
         }
 
         if (allCheckboxes.length > 0) {
-            selectAllCheckbox.checked = selectedCheckboxes.length === allCheckboxes.length;
-            selectAllCheckbox.indeterminate = selectedCheckboxes.length > 0 && selectedCheckboxes.length < allCheckboxes.length;
+            if (selectedCheckboxes.length === allCheckboxes.length) {
+                selectAllCheckbox.checked = true;
+                selectAllCheckbox.indeterminate = false;
+            } else if (selectedCheckboxes.length > 0) {
+                selectAllCheckbox.checked = false;
+                selectAllCheckbox.indeterminate = true;
+            } else {
+                selectAllCheckbox.checked = false;
+                selectAllCheckbox.indeterminate = false;
+            }
         }
 
+        // 更新卡片样式
         fileCheckboxes.forEach(cb => {
             cb.closest('.file-card').classList.toggle('selected', cb.checked);
         });
       }
 
       selectAllCheckbox.addEventListener('change', (e) => {
-        fileCheckboxes.forEach(checkbox => checkbox.checked = e.target.checked);
+        fileCheckboxes.forEach(checkbox => {
+          checkbox.checked = e.target.checked;
+        });
         updateSelectionState();
       });
 
-      fileCheckboxes.forEach(checkbox => checkbox.addEventListener('change', updateSelectionState));
+      fileCheckboxes.forEach(checkbox => {
+        checkbox.addEventListener('change', updateSelectionState);
+      });
 
       deleteSelectedBtn.addEventListener('click', async () => {
         const selectedUrls = Array.from(document.querySelectorAll('.file-checkbox:checked'))
           .map(cb => cb.closest('.file-card').dataset.url);
         
-        if (selectedUrls.length === 0 || !confirm(\`确定要删除选中的 \${selectedUrls.length} 个文件吗？\n此操作不可恢复！\`)) return;
+        if (selectedUrls.length === 0) {
+          alert('请先选择要删除的文件');
+          return;
+        }
+
+        if (!confirm(\`确定要删除选中的 \${selectedUrls.length} 个文件吗？\n此操作不可恢复！\`)) return;
         
         await performDelete(selectedUrls);
       });
@@ -1484,13 +1430,17 @@ function generateAdminPage(fileCards, modals, stats) {
             body: JSON.stringify({ urls })
           });
 
-          if (!response.ok) throw new Error((await response.json()).error || '删除请求失败');
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || '删除请求失败');
+          }
           
           const resultData = await response.json();
           let successCount = 0;
           resultData.results.forEach(res => {
               if(res.success) {
-                  document.querySelector(\`[data-url="\${res.url}"]\`)?.remove();
+                  const card = document.querySelector(\`[data-url="\${res.url}"]\`);
+                  if (card) card.remove();
                   successCount++;
               } else {
                   console.error(\`删除 \${res.url} 失败: \`, res.error);
@@ -1505,49 +1455,7 @@ function generateAdminPage(fileCards, modals, stats) {
         }
       }
       
-      // --- 新增: 编辑和密码复制功能 ---
-      function copyPassword(password, element) {
-        navigator.clipboard.writeText(password).then(() => {
-            const originalText = element.innerHTML;
-            element.innerHTML = '密码已复制!';
-            setTimeout(() => { element.innerHTML = originalText; }, 2000);
-        });
-      }
-
-      function showEditModal(url) {
-        const card = document.querySelector(\`[data-url="\${url}"]\`);
-        document.getElementById('editFileUrl').value = url;
-        document.getElementById('editFileName').value = card.dataset.filename;
-        document.getElementById('editFilePassword').value = card.dataset.password;
-        document.getElementById('editModal').style.display = 'flex';
-      }
-
-      async function saveFileChanges() {
-        const url = document.getElementById('editFileUrl').value;
-        const fileName = document.getElementById('editFileName').value;
-        const password = document.getElementById('editFilePassword').value;
-
-        try {
-            const response = await fetch('/update', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, fileName, password })
-            });
-
-            if (!response.ok) throw new Error((await response.json()).error || '更新失败');
-            
-            const result = await response.json();
-            if (result.success) {
-                alert('更新成功!');
-                window.location.reload(); // 刷新页面以查看更改
-            } else {
-                alert('更新失败: ' + (result.error || '未知错误'));
-            }
-        } catch (error) {
-            alert('操作失败: ' + error.message);
-        }
-      }
-
+      // 初始化状态
       updateSelectionState();
     </script>
   </body>
