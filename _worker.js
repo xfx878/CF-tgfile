@@ -446,7 +446,7 @@ async function handleFileRequest(request, config) {
   }
 }
 
-// [FIXED] 处理文件名修改请求
+// [UPDATED] 处理文件名修改请求
 async function handleEditRequest(request, config) {
     if (config.enableAuth && !authenticate(request, config)) {
         return new Response(JSON.stringify({ error: '未授权' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
@@ -488,6 +488,11 @@ async function handleEditRequest(request, config) {
 
         // D1 .run() 的返回结果中，变更信息在 result.meta.changes
         if (result.meta.changes > 0) {
+            // [FIX] 清除该URL的缓存，以确保下载时使用新文件名
+            const cache = caches.default;
+            await cache.delete(new Request(url, request));
+            console.log(`[Cache Purged] ${url}`);
+
             return new Response(JSON.stringify({ success: true, message: '文件名修改成功' }), {
                 headers: { 'Content-Type': 'application/json' }
             });
@@ -524,6 +529,7 @@ async function handleDeleteRequest(request, config) {
     }
 
     const results = [];
+    const cache = caches.default;
     for (const url of urls) {
       const file = await config.database.prepare(
         'SELECT fileId, message_id FROM files WHERE url = ?'
@@ -548,6 +554,9 @@ async function handleDeleteRequest(request, config) {
       }
 
       await config.database.prepare('DELETE FROM files WHERE url = ?').bind(url).run();
+      // [ADD] 删除文件时也清除缓存
+      await cache.delete(new Request(url, request));
+      console.log(`[Cache Purged] ${url}`);
 
       if (deleteError) {
         results.push({ url, success: true, message: `数据库记录已删除，但TG消息删除失败: ${deleteError}` });
@@ -1145,7 +1154,7 @@ function generateUploadPage() {
   </html>`;
 }
 
-// 生成文件管理页面 /admin
+// [UPDATED] 生成文件管理页面 /admin
 function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
   return `<!DOCTYPE html>
   <html lang="zh-CN">
@@ -1217,11 +1226,20 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
         font-size: 20px;
         display: none; /* Initially hidden */
       }
-      .backup {
+      .backup, .btn-refresh {
         color: #007bff;
         text-decoration: none;
+        padding: 8px 12px;
+        border: 1px solid #007bff;
+        border-radius: 4px;
+        background: rgba(255,255,255,0.7);
+        transition: all 0.2s;
       }
-      .backup:hover { text-decoration: underline; }
+      .backup:hover, .btn-refresh:hover { 
+        text-decoration: none; 
+        background: #007bff;
+        color: white;
+      }
       .grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -1361,6 +1379,7 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
         <div class="header-right">
           <button id="deleteSelectedBtn" class="btn btn-delete" style="display: none;">删除选中</button>
           <input type="checkbox" id="selectAllCheckbox" title="全选">
+          <a href="/admin" class="btn-refresh">刷新</a>
           <a href="/upload" class="backup">返回上传</a>
           <div class="search-container">
             <input type="text" class="search" placeholder="搜索文件名或编号..." id="searchInput">
