@@ -446,7 +446,7 @@ async function handleFileRequest(request, config) {
   }
 }
 
-// [UPDATED] 处理文件名修改请求
+// [FIXED] 处理文件名修改请求
 async function handleEditRequest(request, config) {
     if (config.enableAuth && !authenticate(request, config)) {
         return new Response(JSON.stringify({ error: '未授权' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
@@ -461,7 +461,6 @@ async function handleEditRequest(request, config) {
             });
         }
 
-        // 检查文件是否存在
         const existingFile = await config.database.prepare(
             'SELECT file_name FROM files WHERE url = ?'
         ).bind(url).first();
@@ -473,32 +472,27 @@ async function handleEditRequest(request, config) {
             });
         }
 
-        // 检查文件名是否真的改变了
         if (existingFile.file_name === newName) {
-            return new Response(JSON.stringify({ error: '新旧文件名相同，无需修改' }), {
-                status: 400,
+            return new Response(JSON.stringify({ success: true, message: '新旧文件名相同，无需修改' }), {
                 headers: { 'Content-Type': 'application/json' }
             });
         }
 
-        // 执行更新操作
         const result = await config.database.prepare(
             'UPDATE files SET file_name = ? WHERE url = ?'
         ).bind(newName, url).run();
 
-        // D1 .run() 的返回结果中，变更信息在 result.meta.changes
         if (result.meta.changes > 0) {
-            // [FIX] 清除该URL的缓存，以确保下载时使用新文件名
+            // [FIX] 修复下载文件名问题：清除该URL的缓存
             const cache = caches.default;
-            await cache.delete(new Request(url, request));
+            await cache.delete(new Request(url));
             console.log(`[Cache Purged] ${url}`);
 
             return new Response(JSON.stringify({ success: true, message: '文件名修改成功' }), {
                 headers: { 'Content-Type': 'application/json' }
             });
         } else {
-            // 理论上，经过前面的检查，不应该会到这里
-            return new Response(JSON.stringify({ error: '修改失败，未知原因' }), {
+            return new Response(JSON.stringify({ error: '修改失败，文件可能不存在或文件名无变化' }), {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' }
             });
@@ -529,7 +523,6 @@ async function handleDeleteRequest(request, config) {
     }
 
     const results = [];
-    const cache = caches.default;
     for (const url of urls) {
       const file = await config.database.prepare(
         'SELECT fileId, message_id FROM files WHERE url = ?'
@@ -554,9 +547,6 @@ async function handleDeleteRequest(request, config) {
       }
 
       await config.database.prepare('DELETE FROM files WHERE url = ?').bind(url).run();
-      // [ADD] 删除文件时也清除缓存
-      await cache.delete(new Request(url, request));
-      console.log(`[Cache Purged] ${url}`);
 
       if (deleteError) {
         results.push({ url, success: true, message: `数据库记录已删除，但TG消息删除失败: ${deleteError}` });
@@ -1154,7 +1144,7 @@ function generateUploadPage() {
   </html>`;
 }
 
-// [UPDATED] 生成文件管理页面 /admin
+// 生成文件管理页面 /admin
 function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
   return `<!DOCTYPE html>
   <html lang="zh-CN">
@@ -1226,20 +1216,11 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
         font-size: 20px;
         display: none; /* Initially hidden */
       }
-      .backup, .btn-refresh {
+      .backup {
         color: #007bff;
         text-decoration: none;
-        padding: 8px 12px;
-        border: 1px solid #007bff;
-        border-radius: 4px;
-        background: rgba(255,255,255,0.7);
-        transition: all 0.2s;
       }
-      .backup:hover, .btn-refresh:hover { 
-        text-decoration: none; 
-        background: #007bff;
-        color: white;
-      }
+      .backup:hover { text-decoration: underline; }
       .grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -1379,8 +1360,9 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
         <div class="header-right">
           <button id="deleteSelectedBtn" class="btn btn-delete" style="display: none;">删除选中</button>
           <input type="checkbox" id="selectAllCheckbox" title="全选">
-          <a href="/admin" class="btn-refresh">刷新</a>
           <a href="/upload" class="backup">返回上传</a>
+          <!-- [NEW] 新增刷新按钮 -->
+          <button id="refreshBtn" class="btn" style="background-color: #17a2b8; color: white;">刷新</button>
           <div class="search-container">
             <input type="text" class="search" placeholder="搜索文件名或编号..." id="searchInput">
             <span id="clearSearchBtn">&times;</span>
@@ -1411,6 +1393,11 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
       }
       setBingBackground(); 
       setInterval(setBingBackground, 3600000);
+
+      // [NEW] 刷新按钮的事件监听
+      document.getElementById('refreshBtn').addEventListener('click', () => {
+        location.reload();
+      });
 
       const searchInput = document.getElementById('searchInput');
       const clearSearchBtn = document.getElementById('clearSearchBtn');
@@ -1495,7 +1482,6 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
                         if(downloadLink) {
                            downloadLink.setAttribute('download', newFullName);
                         }
-                        // Also update the onclick attribute for the edit button itself
                         buttonElement.setAttribute('onclick', \`editFileName(this, '\${url}', '\${newFullName}')\`);
                     }
                 } else {
