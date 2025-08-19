@@ -1,6 +1,472 @@
 // 由于tg的限制，虽然可以上传超过20M的文件，但无法返回直链地址
 // 因此修改代码，当文件大于20MB时，直接阻止上传
 
+// HTML模板加载器 - 为了代码的独立性，我将它内联到主文件中
+const templates = {
+  'login.html': `
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{{pageTitle}}</title>
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f7f6; }
+            .login-container { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); text-align: center; }
+            h1 { color: #333; }
+            input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
+            button { width: 100%; padding: 12px; background-color: #007bff; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; }
+            button:hover { background-color: #0056b3; }
+        </style>
+    </head>
+    <body>
+        <div class="login-container">
+            <h1>{{pageTitle}}</h1>
+            <input type="text" id="username" placeholder="用户名" required>
+            <input type="password" id="password" placeholder="密码" required>
+            <button onclick="login()">登录</button>
+        </div>
+        <script>
+            async function login() {
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+                const response = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                if (response.ok) {
+                    window.location.href = '/';
+                } else {
+                    alert('登录失败，请检查用户名和密码');
+                }
+            }
+        </script>
+    </body>
+    </html>
+  `,
+  'upload.html': `
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{{pageTitle}}</title>
+        <style>
+            body { font-family: sans-serif; margin: 0; background-color: #f0f2f5; color: #333; }
+            .navbar { background-color: #fff; padding: 10px 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }
+            .navbar a { color: #007bff; text-decoration: none; font-weight: 500; margin: 0 15px; }
+            .container { max-width: 800px; margin: 40px auto; padding: 20px; background: #fff; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+            .upload-area { border: 2px dashed #007bff; border-radius: 8px; padding: 40px; text-align: center; cursor: pointer; transition: background-color 0.3s; }
+            .upload-area:hover { background-color: #f8f9fa; }
+            .upload-area p { margin: 0; font-size: 18px; color: #555; }
+            #file-input { display: none; }
+            .progress-bar { width: 100%; background-color: #e9ecef; border-radius: 4px; margin-top: 20px; display: none; }
+            .progress { width: 0; height: 20px; background-color: #28a745; border-radius: 4px; text-align: center; color: white; line-height: 20px; }
+            .result { margin-top: 20px; }
+            .result input { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+            footer { text-align: center; margin-top: 40px; padding: 20px; color: #777; }
+        </style>
+    </head>
+    <body>
+        <div class="navbar">
+            <div>
+                <a href="/">文件上传</a>
+                <a href="/admin">文件管理</a>
+            </div>
+            <div>
+                <a href="{{githubUrl}}" target="_blank">{{githubName}}</a>
+                <a href="{{blogUrl}}" target="_blank">{{blogName}}</a>
+            </div>
+        </div>
+        <div class="container">
+            <div class="upload-area" id="upload-area">
+                <p>点击或拖拽文件到此区域上传</p>
+                <p id="file-limit-info"></p>
+            </div>
+            <input type="file" id="file-input">
+            <div class="progress-bar" id="progress-bar">
+                <div class="progress" id="progress">0%</div>
+            </div>
+            <div class="result" id="result" style="display:none;">
+                <p>上传成功！文件链接：</p>
+                <input type="text" id="file-url" readonly>
+            </div>
+        </div>
+        <footer>&copy; 2024 TG File Uploader</footer>
+        <script>
+            const uploadArea = document.getElementById('upload-area');
+            const fileInput = document.getElementById('file-input');
+            const progressBar = document.getElementById('progress-bar');
+            const progress = document.getElementById('progress');
+            const resultDiv = document.getElementById('result');
+            const fileUrlInput = document.getElementById('file-url');
+            const fileLimitInfo = document.getElementById('file-limit-info');
+
+            fetch('/config').then(res => res.json()).then(config => {
+                fileLimitInfo.textContent = '单文件大小限制: ' + config.maxSizeMB + 'MB';
+            });
+
+            uploadArea.addEventListener('click', () => fileInput.click());
+            uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.style.backgroundColor = '#e9ecef'; });
+            uploadArea.addEventListener('dragleave', () => { uploadArea.style.backgroundColor = 'transparent'; });
+            uploadArea.addEventListener('drop', (e) => {
+                e.preventDefault();
+                uploadArea.style.backgroundColor = 'transparent';
+                const files = e.dataTransfer.files;
+                if (files.length > 0) {
+                    fileInput.files = files;
+                    uploadFile(files[0]);
+                }
+            });
+            fileInput.addEventListener('change', () => {
+                if (fileInput.files.length > 0) {
+                    uploadFile(fileInput.files[0]);
+                }
+            });
+
+            function uploadFile(file) {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                progressBar.style.display = 'block';
+                progress.style.width = '0%';
+                progress.textContent = '0%';
+                resultDiv.style.display = 'none';
+
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/upload', true);
+
+                xhr.upload.onprogress = function(e) {
+                    if (e.lengthComputable) {
+                        const percentComplete = (e.loaded / e.total) * 100;
+                        progress.style.width = percentComplete.toFixed(2) + '%';
+                        progress.textContent = percentComplete.toFixed(2) + '%';
+                    }
+                };
+
+                xhr.onload = function() {
+                    if (xhr.status === 200) {
+                        const response = JSON.parse(xhr.responseText);
+                        fileUrlInput.value = response.url;
+                        resultDiv.style.display = 'block';
+                    } else {
+                        const error = JSON.parse(xhr.responseText);
+                        alert('上传失败: ' + error.error);
+                        progressBar.style.display = 'none';
+                    }
+                };
+                
+                xhr.onerror = function() {
+                    alert('网络错误，上传失败。');
+                    progressBar.style.display = 'none';
+                };
+
+                xhr.send(formData);
+            }
+        </script>
+    </body>
+    </html>
+  `,
+  'admin.html': `
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{{pageTitle}}</title>
+        <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+        <style>
+            body { font-family: sans-serif; margin: 0; background-color: #f0f2f5; }
+            .navbar { background-color: #fff; padding: 10px 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }
+            .navbar a { color: #007bff; text-decoration: none; font-weight: 500; }
+            .container { max-width: 1200px; margin: 20px auto; padding: 20px; }
+            .admin-header { background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+            .stats, .actions, .search-box { display: flex; align-items: center; gap: 15px; }
+            .stats span { font-size: 14px; color: #555; background: #f0f2f5; padding: 5px 10px; border-radius: 5px; }
+            .actions label { display: flex; align-items: center; cursor: pointer; }
+            .btn { padding: 8px 12px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; text-align: center; }
+            .btn-danger { background-color: #dc3545; color: white; }
+            .btn-danger:hover { background-color: #c82333; }
+            .search-box input { padding: 8px; border: 1px solid #ccc; border-radius: 5px; }
+            .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; }
+            .file-card { background: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); overflow: hidden; display: flex; flex-direction: column; }
+            .file-card .file-select { padding: 5px 10px; background: #f8f9fa; border-bottom: 1px solid #eee; }
+            .file-preview { height: 150px; display: flex; justify-content: center; align-items: center; background: #f0f2f5; }
+            .file-preview img, .file-preview video { max-width: 100%; max-height: 100%; object-fit: contain; }
+            .file-info { padding: 10px; flex-grow: 1; }
+            .file-info div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: #666; margin-bottom: 5px; }
+            .file-info div:first-child { font-weight: bold; color: #333; }
+            .file-actions { display: flex; justify-content: space-around; padding: 10px; border-top: 1px solid #eee; }
+            .file-actions .btn { flex: 1; margin: 0 5px; padding: 6px; font-size: 12px; }
+            .btn-copy { background-color: #28a745; color: white; }
+            .btn-down { background-color: #007bff; color: white; }
+            .btn-delete { background-color: #ffc107; color: #212529; }
+            .qr-modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); justify-content: center; align-items: center; }
+            .qr-content { background: white; padding: 20px; border-radius: 8px; text-align: center; }
+            #qrcode { padding: 10px; }
+            .qr-buttons { margin-top: 15px; }
+            /* Custom Alert/Confirm Modal */
+            .custom-modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 2000; opacity: 0; pointer-events: none; transition: opacity 0.3s; }
+            .custom-modal-overlay.active { opacity: 1; pointer-events: auto; }
+            .custom-modal { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); text-align: center; max-width: 350px; transform: scale(0.9); transition: transform 0.3s; }
+            .custom-modal.active { transform: scale(1); }
+            .custom-modal p { margin: 0 0 20px; font-size: 16px; }
+            .custom-modal-buttons { display: flex; justify-content: center; gap: 10px; }
+            .custom-modal-buttons button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
+            .modal-btn-confirm { background-color: #dc3545; color: white; }
+            .modal-btn-cancel { background-color: #6c757d; color: white; }
+            .modal-btn-ok { background-color: #007bff; color: white; }
+        </style>
+    </head>
+    <body>
+        <div class="navbar">
+            <a href="/">文件上传</a>
+            <a href="/admin">文件管理</a>
+        </div>
+        <div class="container">
+            <div class="admin-header">
+                <div class="stats">
+                    <span>文件总数: {{totalFiles}}</span>
+                    <span>总大小: {{totalSize}}</span>
+                </div>
+                <div class="actions">
+                    <label><input type="checkbox" id="selectAllCheckbox"> 全选</label>
+                    <button id="deleteSelectedBtn" class="btn btn-danger">删除选中</button>
+                </div>
+                <div class="search-box">
+                    <input type="text" id="searchInput" placeholder="搜索文件名...">
+                    <button id="searchBtn" class="btn btn-down">搜索</button>
+                </div>
+            </div>
+            <div class="file-grid" id="fileGrid">
+                {{{FILE_CARDS}}}
+            </div>
+        </div>
+        
+        {{{QR_MODAL}}}
+
+        <!-- Custom Alert/Confirm Modal Structure -->
+        <div id="custom-modal-overlay" class="custom-modal-overlay">
+            <div id="custom-modal" class="custom-modal">
+                <p id="custom-modal-message"></p>
+                <div id="custom-modal-buttons" class="custom-modal-buttons"></div>
+            </div>
+        </div>
+
+        <script>
+            let currentUrlToCopy = '';
+            const qrModal = document.getElementById('qrModal');
+            const qrcodeContainer = document.getElementById('qrcode');
+            let qrcode = new QRCode(qrcodeContainer, { width: 200, height: 200 });
+
+            function showQRCode(url) {
+                currentUrlToCopy = url;
+                qrcode.makeCode(url);
+                qrModal.style.display = 'flex';
+            }
+
+            function closeQRModal() {
+                qrModal.style.display = 'none';
+                qrcode.clear();
+            }
+
+            function handleCopyUrl() {
+                navigator.clipboard.writeText(currentUrlToCopy).then(() => {
+                    showCustomAlert('链接已复制到剪贴板');
+                    closeQRModal();
+                }, () => {
+                    showCustomAlert('复制失败');
+                });
+            }
+
+            // --- 新增功能: 弹窗、全选和批量删除 ---
+            const modalOverlay = document.getElementById('custom-modal-overlay');
+            const modal = document.getElementById('custom-modal');
+            const modalMessage = document.getElementById('custom-modal-message');
+            const modalButtons = document.getElementById('custom-modal-buttons');
+
+            function showCustomAlert(message) {
+                modalMessage.textContent = message;
+                modalButtons.innerHTML = '<button class="modal-btn-ok">确定</button>';
+                modalOverlay.classList.add('active');
+                modal.classList.add('active');
+
+                modalButtons.querySelector('.modal-btn-ok').onclick = () => {
+                    modalOverlay.classList.remove('active');
+                    modal.classList.remove('active');
+                };
+            }
+
+            function showCustomConfirm(message) {
+                return new Promise(resolve => {
+                    modalMessage.textContent = message;
+                    modalButtons.innerHTML = '<button class="modal-btn-confirm">确认</button><button class="modal-btn-cancel">取消</button>';
+                    modalOverlay.classList.add('active');
+                    modal.classList.add('active');
+
+                    modalButtons.querySelector('.modal-btn-confirm').onclick = () => {
+                        modalOverlay.classList.remove('active');
+                        modal.classList.remove('active');
+                        resolve(true);
+                    };
+                    modalButtons.querySelector('.modal-btn-cancel').onclick = () => {
+                        modalOverlay.classList.remove('active');
+                        modal.classList.remove('active');
+                        resolve(false);
+                    };
+                });
+            }
+            
+            async function deleteFile(url, isBatch = false) {
+                const confirmed = isBatch ? true : await showCustomConfirm('确定要删除这个文件吗？');
+                if (confirmed) {
+                    try {
+                        const response = await fetch('/delete', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ url })
+                        });
+                        const result = await response.json();
+                        if (response.ok && result.success) {
+                            if (!isBatch) {
+                                showCustomAlert('删除成功').then(() => location.reload());
+                            }
+                        } else {
+                            throw new Error(result.error || '删除失败');
+                        }
+                    } catch (error) {
+                        if (!isBatch) {
+                            showCustomAlert('删除失败: ' + error.message);
+                        }
+                    }
+                }
+            }
+
+            document.getElementById('selectAllCheckbox').addEventListener('change', (e) => {
+                document.querySelectorAll('.file-checkbox').forEach(checkbox => {
+                    checkbox.checked = e.target.checked;
+                });
+            });
+
+            document.getElementById('deleteSelectedBtn').addEventListener('click', async () => {
+                const selectedCheckboxes = document.querySelectorAll('.file-checkbox:checked');
+                if (selectedCheckboxes.length === 0) {
+                    showCustomAlert('请先选择要删除的文件。');
+                    return;
+                }
+                
+                const confirmed = await showCustomConfirm(\`确定要删除选中的 \${selectedCheckboxes.length} 个文件吗？\`);
+                if (confirmed) {
+                    let failedDeletes = 0;
+                    for (const checkbox of selectedCheckboxes) {
+                        const url = checkbox.dataset.url;
+                        try {
+                            const response = await fetch('/delete', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ url })
+                            });
+                            if (!response.ok) failedDeletes++;
+                        } catch (error) {
+                            failedDeletes++;
+                        }
+                    }
+                    if (failedDeletes > 0) {
+                        showCustomAlert(\`\${selectedCheckboxes.length - failedDeletes} 个文件删除成功，\${failedDeletes} 个失败。\`).then(() => location.reload());
+                    } else {
+                        showCustomAlert('选中的文件已全部删除。').then(() => location.reload());
+                    }
+                }
+            });
+
+            // 搜索功能
+            const performSearch = async () => {
+                const query = document.getElementById('searchInput').value;
+                if (!query) {
+                    location.reload();
+                    return;
+                }
+                try {
+                    const response = await fetch('/search', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ query })
+                    });
+                    const result = await response.json();
+                    const fileGrid = document.getElementById('fileGrid');
+                    if (response.ok) {
+                        fileGrid.innerHTML = result.files.map(file => createFileCard(file)).join('');
+                    } else {
+                        throw new Error(result.error || '搜索失败');
+                    }
+                } catch (error) {
+                    showCustomAlert('搜索失败: ' + error.message);
+                }
+            };
+
+            document.getElementById('searchBtn').addEventListener('click', performSearch);
+            document.getElementById('searchInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    performSearch();
+                }
+            });
+
+            function createFileCard(file) {
+                const fileName = file.file_name;
+                const fileSize = formatSize(file.file_size || 0);
+                const createdAt = new Date(file.created_at).toISOString().replace('T', ' ').split('.')[0];
+                return \`
+                    <div class="file-card" data-url="\${file.url}">
+                        <div class="file-select">
+                            <input type="checkbox" class="file-checkbox" data-url="\${file.url}">
+                        </div>
+                        <div class="file-preview">\${getPreviewHtml(file.url)}</div>
+                        <div class="file-info">
+                            <div>\${fileName}</div>
+                            <div>\${fileSize}</div>
+                            <div>\${createdAt}</div>
+                        </div>
+                        <div class="file-actions">
+                            <button class="btn btn-copy" onclick="showQRCode('\${file.url}')">分享</button>
+                            <a class="btn btn-down" href="\${file.url}" download="\${fileName}">下载</a>
+                            <button class="btn btn-delete" onclick="deleteFile('\${file.url}')">删除</button>
+                        </div>
+                    </div>
+                \`;
+            }
+            function formatSize(bytes) {
+                if (bytes === 0) return '0 B';
+                const units = ['B', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(1024));
+                return \`\${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} \${units[i]}\`;
+            }
+            function getPreviewHtml(url) {
+                const ext = (url.split('.').pop() || '').toLowerCase();
+                const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico'].includes(ext);
+                const isVideo = ['mp4', 'webm'].includes(ext);
+                const isAudio = ['mp3', 'wav', 'ogg'].includes(ext);
+                if (isImage) return \`<img src="\${url}" alt="预览" loading="lazy">\`;
+                if (isVideo) return \`<video src="\${url}" controls></video>\`;
+                if (isAudio) return \`<audio src="\${url}" controls></audio>\`;
+                return \`<div style="font-size: 48px">📄</div>\`;
+            }
+        </script>
+    </body>
+    </html>
+  `
+};
+
+async function loadTemplate(name) {
+  return templates[name] || '';
+}
+
+function render(template, data) {
+  return template.replace(/\{\{\{?(\w+)\}\}?}/g, (match, key) => {
+    return data[key] || '';
+  });
+}
+
 // 数据库初始化函数
 async function initDatabase(config) {
   await config.database.prepare(`
@@ -8,11 +474,10 @@ async function initDatabase(config) {
       url TEXT PRIMARY KEY,
       fileId TEXT NOT NULL,
       message_id INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
       file_name TEXT,
       file_size INTEGER,
-      mime_type TEXT,
-      password TEXT
+      mime_type TEXT
     )
   `).run();
 }
@@ -30,21 +495,21 @@ export default {
       tgBotToken: env.TG_BOT_TOKEN,
       tgChatId: env.TG_CHAT_ID,
       cookie: Number(env.COOKIE) || 7, // cookie有效期默认为 7
-      maxSizeMB: Number(env.MAX_SIZE_MB) || 20 // 上传单文件大小默认为20M
+      maxSizeMB: Number(env.MAX_SIZE_MB) || 20, // 上传单文件大小默认为20M
+      apiKey: env.API_KEY
     };
 
     // 初始化数据库
     await initDatabase(config);
     // 路由处理
     const { pathname } = new URL(request.url);
-
     if (pathname === '/config') {
       const safeConfig = { maxSizeMB: config.maxSizeMB };
       return new Response(JSON.stringify(safeConfig), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
-    
+
     const routes = {
       '/': () => handleAuthRequest(request, config),
       '/login': () => handleLoginRequest(request, config),
@@ -52,8 +517,7 @@ export default {
       '/admin': () => handleAdminRequest(request, config),
       '/delete': () => handleDeleteRequest(request, config),
       '/search': () => handleSearchRequest(request, config),
-      '/update': () => handleUpdateRequest(request, config), // 新增：处理编辑请求
-      '/bing': handleBingImagesRequest
+      '/bing': () => handleBingImagesRequest(request, config)
     };
     const handler = routes[pathname];
     if (handler) {
@@ -130,7 +594,7 @@ async function handleLoginRequest(request, config) {
     }
     return new Response("认证失败", { status: 401 });
   }
-  const html = generateLoginPage();  // 如果是GET请求，返回登录页面
+  const html = await generateLoginPage();  // 如果是GET请求，返回登录页面
   return new Response(html, {
     headers: { 'Content-Type': 'text/html;charset=UTF-8' }
   });
@@ -142,7 +606,7 @@ async function handleUploadRequest(request, config) {
     return Response.redirect(`${new URL(request.url).origin}/`, 302);
   }
   if (request.method === 'GET') {
-    const html = generateUploadPage();
+    const html = await generateUploadPage();
     return new Response(html, {
       headers: { 'Content-Type': 'text/html;charset=UTF-8' }
     });
@@ -151,7 +615,6 @@ async function handleUploadRequest(request, config) {
   try {
     const formData = await request.formData();
     const file = formData.get('file');
-    const password = formData.get('password'); // 新增：获取密码
     if (!file) throw new Error('未找到文件');
     if (file.size > config.maxSizeMB * 1024 * 1024) throw new Error(`文件超过${config.maxSizeMB}MB限制`);
     
@@ -166,9 +629,10 @@ async function handleUploadRequest(request, config) {
     };
     let { method = 'sendDocument', field = 'document' } = typeMap[mainType] || {};
 
-    if (['application', 'text'].includes(mainType)) {
-      method = 'sendDocument';
-      field = 'document';
+    // 对于所有其他类型，都使用 sendDocument
+    if (!typeMap[mainType]) {
+        method = 'sendDocument';
+        field = 'document';
     }
 
     const tgFormData = new FormData();
@@ -191,12 +655,12 @@ async function handleUploadRequest(request, config) {
     if (!messageId) throw new Error('未获取到tg消息ID');
 
     const time = Date.now();
-    const timestamp = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+    const timestamp = new Date().toISOString();
     const url = `https://${config.domain}/${time}.${ext}`;
     
     await config.database.prepare(`
-      INSERT INTO files (url, fileId, message_id, created_at, file_name, file_size, mime_type, password) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO files (url, fileId, message_id, created_at, file_name, file_size, mime_type) 
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).bind(
       url,
       fileId,
@@ -204,8 +668,7 @@ async function handleUploadRequest(request, config) {
       timestamp,
       file.name,
       file.size,
-      file.type || getContentType(ext),
-      password || null // 新增：保存密码
+      file.type || getContentType(ext)
     ).run();
 
     return new Response(
@@ -215,17 +678,9 @@ async function handleUploadRequest(request, config) {
 
   } catch (error) {
     console.error(`[Upload Error] ${error.message}`);
-    // 根据错误信息设定不同的状态码
-    let statusCode = 500; // 默认500
-    if (error.message.includes(`文件超过${config.maxSizeMB}MB限制`)) {
-      statusCode = 400; // 客户端错误：文件大小超限
-    } else if (error.message.includes('Telegram参数配置错误')) {
-      statusCode = 502; // 网关错误：与Telegram通信失败
-    } else if (error.message.includes('未获取到文件ID') || error.message.includes('未获取到tg消息ID')) {
-      statusCode = 500; // 服务器内部错误：Telegram返回数据异常
-    } else if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-      statusCode = 504; // 网络超时或断网
-    }
+    let statusCode = 500;
+    if (error.message.includes(`文件超过${config.maxSizeMB}MB限制`)) statusCode = 400;
+    else if (error.message.includes('Telegram参数配置错误')) statusCode = 502;
     return new Response(
       JSON.stringify({ status: 0, msg: "✘ 上传失败", error: error.message }),
       { status: statusCode, headers: { 'Content-Type': 'application/json' }}
@@ -240,42 +695,37 @@ async function handleAdminRequest(request, config) {
   }
 
   const files = await config.database.prepare(
-    `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type, password
+    `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type
     FROM files
     ORDER BY created_at DESC`
   ).all();
 
   const fileList = files.results || [];
   
-  // 新增：计算文件总数和总大小
+  // 新增：计算统计数据
   const totalFiles = fileList.length;
   const totalSize = fileList.reduce((sum, file) => sum + (file.file_size || 0), 0);
-  const stats = {
-    count: totalFiles,
-    size: formatSize(totalSize)
-  };
+  const formattedTotalSize = formatSize(totalSize);
 
   const fileCards = fileList.map(file => {
     const fileName = file.file_name;
     const fileSize = formatSize(file.file_size || 0);
     const createdAt = new Date(file.created_at).toISOString().replace('T', ' ').split('.')[0];
-    const passwordDisplay = file.password ? `密码: ${file.password}` : '密码: 无';
-    // 文件预览信息和操作元素
     return `
       <div class="file-card" data-url="${file.url}">
-        <input type="checkbox" class="file-checkbox">
+        <div class="file-select">
+          <input type="checkbox" class="file-checkbox" data-url="${file.url}">
+        </div>
         <div class="file-preview">
           ${getPreviewHtml(file.url)}
         </div>
         <div class="file-info">
-          <div class="file-name">${fileName}</div>
+          <div>${fileName}</div>
           <div>${fileSize}</div>
           <div>${createdAt}</div>
-          <div class="file-password" onclick="copyToClipboard('${file.password}', '密码已复制')">${passwordDisplay}</div>
         </div>
         <div class="file-actions">
           <button class="btn btn-copy" onclick="showQRCode('${file.url}')">分享</button>
-          <button class="btn btn-edit" onclick="editFile('${file.url}', '${file.file_name}', '${file.password || ''}')">编辑</button>
           <a class="btn btn-down" href="${file.url}" download="${fileName}">下载</a>
           <button class="btn btn-delete" onclick="deleteFile('${file.url}')">删除</button>
         </div>
@@ -283,43 +733,19 @@ async function handleAdminRequest(request, config) {
     `;
   }).join('');
 
-  // 二维码分享元素
   const qrModal = `
-    <div id="qrModal" class="modal">
-      <div class="modal-content">
+    <div id="qrModal" class="qr-modal">
+      <div class="qr-content">
         <div id="qrcode"></div>
-        <div class="qr-link-container">
-          <a id="qrLink" href="#" target="_blank"></a>
-          <button class="btn btn-copy" onclick="copyToClipboard(document.getElementById('qrLink').href, '链接已复制')">复制</button>
+        <div class="qr-buttons">
+          <button class="btn btn-copy" onclick="handleCopyUrl()">复制链接</button>
+          <button class="btn btn-delete" onclick="closeQRModal()">关闭</button>
         </div>
-        <button class="modal-close" onclick="closeModal('qrModal')">关闭</button>
       </div>
     </div>
   `;
 
-  // 新增：编辑模态框
-  const editModal = `
-    <div id="editModal" class="modal">
-        <div class="modal-content">
-            <h3>编辑文件信息</h3>
-            <input type="hidden" id="editFileUrl">
-            <div class="form-group">
-                <label for="editFileName">文件名:</label>
-                <input type="text" id="editFileName" class="form-control">
-            </div>
-            <div class="form-group">
-                <label for="editFilePassword">访问密码 (留空则无密码):</label>
-                <input type="text" id="editFilePassword" class="form-control">
-            </div>
-            <div class="modal-buttons">
-                <button class="btn btn-save" onclick="saveChanges()">保存</button>
-                <button class="modal-close" onclick="closeModal('editModal')">取消</button>
-            </div>
-        </div>
-    </div>
-  `;
-
-  const html = generateAdminPage(fileCards, qrModal, editModal, stats);
+  const html = await generateAdminPage(fileCards, qrModal, totalFiles, formattedTotalSize);
   return new Response(html, {
     headers: { 'Content-Type': 'text/html;charset=UTF-8' }
   });
@@ -328,16 +754,16 @@ async function handleAdminRequest(request, config) {
 // 处理文件搜索
 async function handleSearchRequest(request, config) {
   if (config.enableAuth && !authenticate(request, config)) {
-    return Response.redirect(`${new URL(request.url).origin}/`, 302);
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
   }
 
   try {
     const { query } = await request.json();
     const searchPattern = `%${query}%`;    
     const files = await config.database.prepare(
-      `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type, password
+      `SELECT url, fileId, message_id, created_at, file_name, file_size, mime_type
        FROM files 
-       WHERE file_name LIKE ? ESCAPE '!'
+       WHERE file_name LIKE ?
        COLLATE NOCASE
        ORDER BY created_at DESC`
     ).bind(searchPattern).all();
@@ -359,7 +785,7 @@ async function handleSearchRequest(request, config) {
 // 支持预览的文件类型
 function getPreviewHtml(url) {
   const ext = (url.split('.').pop() || '').toLowerCase();
-  const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'icon'].includes(ext);
+  const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico'].includes(ext);
   const isVideo = ['mp4', 'webm'].includes(ext);
   const isAudio = ['mp3', 'wav', 'ogg'].includes(ext);
 
@@ -376,231 +802,93 @@ function getPreviewHtml(url) {
 
 // 获取文件并缓存
 async function handleFileRequest(request, config) {
-  const url = new URL(request.url);
+  const url = request.url;
   const cache = caches.default;
-  const cacheKey = new Request(url.origin + url.pathname);
+  const cacheKey = new Request(url, request);
 
   try {
-    // 从数据库查询文件
+    const cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) return cachedResponse;
+
     const file = await config.database.prepare(
-      `SELECT fileId, message_id, file_name, mime_type, password
-      FROM files WHERE url = ?`
-    ).bind(url.origin + url.pathname).first();
+      `SELECT fileId, file_name, mime_type FROM files WHERE url = ?`
+    ).bind(url).first();
 
     if (!file) {
-      console.log(`[404] File not found: ${url}`);
-      return new Response('文件不存在', { 
-        status: 404,
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
-      });
+      return new Response('文件不存在', { status: 404 });
     }
 
-    // 密码保护逻辑
-    if (file.password) {
-      if (request.method === 'POST') {
-        const formData = await request.formData();
-        const submittedPassword = formData.get('password');
-        if (submittedPassword === file.password) {
-          const response = new Response('密码正确，正在跳转...', { status: 302, headers: { 'Location': url.pathname } });
-          // 设置一个cookie来记住密码，有效期1小时
-          response.headers.set('Set-Cookie', `file_access_${file.fileId}=${file.password}; Path=${url.pathname}; Max-Age=3600`);
-          return response;
-        } else {
-          return new Response(generatePasswordPage('密码错误，请重试'), { status: 401, headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
-        }
-      }
-
-      const cookieHeader = request.headers.get('Cookie') || '';
-      const accessCookie = cookieHeader.split(';').find(c => c.trim().startsWith(`file_access_${file.fileId}=`));
-      if (!accessCookie || accessCookie.split('=')[1] !== file.password) {
-        return new Response(generatePasswordPage(), { status: 401, headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
-      }
-    }
-
-    // 尝试从缓存获取
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) {
-      console.log(`[Cache Hit] ${url}`);
-      return cachedResponse;
-    }
-
-    // 获取 Telegram 文件路径
-    const tgResponse = await fetch(
-      `https://api.telegram.org/bot${config.tgBotToken}/getFile?file_id=${file.fileId}`
-    );
-
-    if (!tgResponse.ok) {
-      console.error(`[Telegram API Error] ${await tgResponse.text()} for file ${file.fileId}`);
-      return new Response('获取文件失败', { 
-        status: 500,
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
-      });
-    }
-
+    const tgResponse = await fetch(`https://api.telegram.org/bot${config.tgBotToken}/getFile?file_id=${file.fileId}`);
+    if (!tgResponse.ok) throw new Error('获取TG文件信息失败');
+    
     const tgData = await tgResponse.json();
     const filePath = tgData.result?.file_path;
+    if (!filePath) throw new Error('无效的文件路径');
 
-    if (!filePath) {
-      console.error(`[Invalid Path] No file_path in response for ${file.fileId}`);
-      return new Response('文件路径无效', { 
-        status: 404,
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
-      });
-    }
-
-    // 下载文件
     const fileUrl = `https://api.telegram.org/file/bot${config.tgBotToken}/${filePath}`;
     const fileResponse = await fetch(fileUrl);
+    if (!fileResponse.ok) throw new Error('下载文件失败');
 
-    if (!fileResponse.ok) {
-      console.error(`[Download Error] Failed to download from ${fileUrl}`);
-      return new Response('下载文件失败', { 
-        status: 500,
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
-      });
-    }
-
-    // 使用存储的 MIME 类型或根据扩展名判断
-    const contentType = file.mime_type || getContentType(url.pathname.split('.').pop().toLowerCase());
-
-    // 创建响应并缓存
     const response = new Response(fileResponse.body, {
       headers: {
-        'Content-Type': contentType,
+        'Content-Type': file.mime_type || getContentType(url.split('.').pop().toLowerCase()),
         'Cache-Control': 'public, max-age=31536000',
-        'X-Content-Type-Options': 'nosniff',
-        'Access-Control-Allow-Origin': '*',
         'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(file.file_name || '')}`
       }
     });
 
     await cache.put(cacheKey, response.clone());
-    console.log(`[Cache Set] ${url}`);
     return response;
 
   } catch (error) {
-    console.error(`[Error] ${error.message} for ${url}`);
-    return new Response('服务器内部错误', { 
-      status: 500,
-      headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
-    });
+    console.error(`[File Request Error] ${error.message} for ${url}`);
+    return new Response('服务器内部错误', { status: 500 });
   }
 }
 
 // 处理文件删除
 async function handleDeleteRequest(request, config) {
   if (config.enableAuth && !authenticate(request, config)) {
-    return new Response(JSON.stringify({ error: '未授权' }), { status: 401 });
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
   }
 
   try {
-    const { urls } = await request.json();
-    if (!urls || !Array.isArray(urls) || urls.length === 0) {
-      return new Response(JSON.stringify({ error: '无效的URL列表' }), {
-        status: 400, 
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
+    const { url } = await request.json();
+    if (!url) throw new Error('无效的URL');
 
-    const results = [];
-    for (const url of urls) {
-      const file = await config.database.prepare(
-        'SELECT fileId, message_id FROM files WHERE url = ?'
-      ).bind(url).first();
+    const file = await config.database.prepare('SELECT message_id FROM files WHERE url = ?').bind(url).first();    
+    if (!file) throw new Error('文件不存在');
 
-      if (!file) {
-        results.push({ url, success: false, error: '文件不存在' });
-        continue;
-      }
-
-      let deleteError = null;
-      try {
-        const deleteResponse = await fetch(
-          `https://api.telegram.org/bot${config.tgBotToken}/deleteMessage?chat_id=${config.tgChatId}&message_id=${file.message_id}`
-        );
-        if (!deleteResponse.ok) {
-          const errorData = await deleteResponse.json();
-          throw new Error(errorData.description || 'Telegram API 错误');
-        }
-      } catch (error) {
-        deleteError = error.message;
-      }
-
-      await config.database.prepare('DELETE FROM files WHERE url = ?').bind(url).run();
-
-      if (deleteError) {
-        results.push({ url, success: true, message: `数据库记录已删除，但TG消息删除失败: ${deleteError}` });
-      } else {
-        results.push({ url, success: true, message: '文件删除成功' });
-      }
-    }
+    const deleteResponse = await fetch(`https://api.telegram.org/bot${config.tgBotToken}/deleteMessage?chat_id=${config.tgChatId}&message_id=${file.message_id}`);
+    const deleteData = await deleteResponse.json();
     
-    return new Response(JSON.stringify({ results }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
+    // 即使TG删除失败也继续删除数据库记录，因为消息可能已被手动删除
+    if (!deleteResponse.ok) {
+        console.warn(`TG消息删除失败: ${deleteData.description}`);
+    }
+
+    await config.database.prepare('DELETE FROM files WHERE url = ?').bind(url).run();
+    
+    return new Response(JSON.stringify({ success: true, message: '文件删除成功' }), { headers: { 'Content-Type': 'application/json' }});
 
   } catch (error) {
     console.error(`[Delete Error] ${error.message}`);
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: 500, headers: { 'Content-Type': 'application/json' }}
-    );
+    return new Response(JSON.stringify({ error: error.message }), { status: 500 });
   }
 }
-
-// 新增：处理文件信息更新
-async function handleUpdateRequest(request, config) {
-    if (config.enableAuth && !authenticate(request, config)) {
-        return new Response(JSON.stringify({ error: '未授权' }), { status: 401 });
-    }
-
-    if (request.method !== 'POST') {
-        return new Response(JSON.stringify({ error: '方法不允许' }), { status: 405 });
-    }
-
-    try {
-        const { url, fileName, password } = await request.json();
-        if (!url || !fileName) {
-            return new Response(JSON.stringify({ error: '缺少必要参数' }), { status: 400 });
-        }
-
-        const result = await config.database.prepare(
-            'UPDATE files SET file_name = ?, password = ? WHERE url = ?'
-        ).bind(fileName, password || null, url).run();
-
-        if (result.changes > 0) {
-            return new Response(JSON.stringify({ success: true, message: '更新成功' }), {
-                headers: { 'Content-Type': 'application/json' }
-            });
-        } else {
-            return new Response(JSON.stringify({ success: false, error: '未找到要更新的文件或数据无变化' }), {
-                status: 404,
-                headers: { 'Content-Type': 'application/json' }
-            });
-        }
-    } catch (error) {
-        console.error(`[Update Error] ${error.message}`);
-        return new Response(JSON.stringify({ error: '服务器内部错误' }), {
-            status: 500,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-}
-
 
 // 支持上传的文件类型
 function getContentType(ext) {
   const types = {
     jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
-    webp: 'image/webp', svg: 'image/svg+xml', icon: 'image/x-icon',
+    webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon',
     mp4: 'video/mp4', webm: 'video/webm',
     mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
     pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown',
     zip: 'application/zip', rar: 'application/x-rar-compressed',
-    json: 'application/json', xml: 'application/xml', ini: 'text/plain',
-    js: 'application/javascript', yml: 'application/yaml', yaml: 'application/yaml',
-    py: 'text/x-python', sh: 'application/x-sh',
-    // 添加更多办公和常见文件类型
+    json: 'application/json', xml: 'application/xml',
+    js: 'application/javascript', css: 'text/css', html: 'text/html',
+    // 添加更多常见格式
     doc: 'application/msword',
     docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     xls: 'application/vnd.ms-excel',
@@ -612,29 +900,21 @@ function getContentType(ext) {
   return types[ext] || 'application/octet-stream';
 }
 
-async function handleBingImagesRequest() {
+async function handleBingImagesRequest(request, config) {
   const cache = caches.default;
-  const cacheKey = new Request('https://cn.bing.com/HPImageArchive.aspx?format=js&idx=0&n=5');
+  const cacheKey = new Request('https://cn.bing.com/HPImageArchive.aspx?format=js&idx=0&n=5', request);
   
   const cachedResponse = await cache.match(cacheKey);
-  if (cachedResponse) {
-    console.log('Returning cached response');
-    return cachedResponse;
-  }
+  if (cachedResponse) return cachedResponse;
   
   try {
-    const res = await fetch(cacheKey);
-    if (!res.ok) {
-      console.error(`Bing API 请求失败，状态码：${res.status}`);
-      return new Response('请求 Bing API 失败', { status: res.status });
-    }
+    const res = await fetch(cacheKey.url);
+    if (!res.ok) throw new Error(`Bing API 请求失败: ${res.status}`);
     
     const bingData = await res.json();
     const images = bingData.images.map(image => ({ url: `https://cn.bing.com${image.url}` }));
-    const returnData = { status: true, message: "操作成功", data: images };
     
-    const response = new Response(JSON.stringify(returnData), { 
-      status: 200, 
+    const response = new Response(JSON.stringify({ status: true, data: images }), { 
       headers: { 
         'Content-Type': 'application/json',
         'Cache-Control': 'public, max-age=21600',
@@ -643,11 +923,10 @@ async function handleBingImagesRequest() {
     });
     
     await cache.put(cacheKey, response.clone());
-    console.log('响应数据已缓存');
     return response;
   } catch (error) {
-    console.error('请求 Bing API 过程中发生错误:', error);
-    return new Response('请求 Bing API 失败', { status: 500 });
+    console.error('请求 Bing API 失败:', error);
+    return new Response(JSON.stringify({ status: false, error: error.message }), { status: 500 });
   }
 }
 
@@ -655,984 +934,34 @@ async function handleBingImagesRequest() {
 function formatSize(bytes) {
     if (bytes === 0) return '0 B';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    let size = bytes;
-    let unitIndex = 0;
-    while (size >= 1024 && unitIndex < units.length - 1) {
-      size /= 1024;
-      unitIndex++;
-    }
-    return `${size.toFixed(2)} ${units[unitIndex]}`;
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${units[i]}`;
 }
 
-// 登录页面生成函数 /login
-function generateLoginPage() {
-  return `<!DOCTYPE html>
-  <html lang="zh-CN">
-  <head>
-  <link rel="shortcut icon" href="https://pan.811520.xyz/2025-02/1739241502-tgfile-favicon.ico" type="image/x-icon">
-  <meta name="description" content="Telegram文件存储与分享平台">
-  <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>登录</title>
-    <style>
-      body {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        height: 100vh;
-        background: #f5f5f5;
-        font-family: Arial, sans-serif;
-        background-size: cover;
-        background-position: center;
-        transition: background-image 1s ease-in-out;
-      }
-      .login-container {
-        background: rgba(255, 255, 255, 0.8);
-        backdrop-filter: blur(10px);
-        padding: 20px;
-        border-radius: 8px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        width: 100%;
-        max-width: 400px;
-      }
-      .form-group {
-        margin-bottom: 1rem;
-      }
-      input {
-        width: 100%;
-        padding: 0.75rem;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        font-size: 1rem;
-        box-sizing: border-box;
-        background: rgba(255, 255, 255, 0.7);
-        color: #333;
-      }
-      button {
-        width: 100%;
-        padding: 0.75rem;
-        background: #007bff;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        font-size: 1rem;
-        cursor: pointer;
-        margin-bottom: 10px;
-      }
-      button:hover {
-        background: #0056b3;
-      }
-      .error {
-        color: #dc3545;
-        margin-top: 1rem;
-        display: none;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="login-container">
-      <h2 style="text-align: center; margin-bottom: 2rem;">登录</h2>
-      <form id="loginForm">
-        <div class="form-group">
-          <input type="text" id="username" placeholder="用户名" required>
-        </div>
-        <div class="form-group">
-          <input type="password" id="password" placeholder="密码" required>
-        </div>
-        <button type="submit">登录</button>
-        <div id="error" class="error">用户名或密码错误</div>
-      </form>
-    </div>
-    <script>
-      // 添加背景图相关函数
-      async function setBingBackground() {
-        try {
-          const response = await fetch('/bing');
-          const data = await response.json();
-          if (data.status && data.data && data.data.length > 0) {
-            const randomIndex = Math.floor(Math.random() * data.data.length);
-            document.body.style.backgroundImage = \`url(\${data.data[randomIndex].url})\`;
-          }
-        } catch (error) {
-          console.error('获取背景图失败:', error);
-        }
-      }
-      // 页面加载时设置背景图
-      setBingBackground(); 
-      // 每小时更新一次背景图
-      setInterval(setBingBackground, 3600000);
-
-      document.getElementById('loginForm').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const username = document.getElementById('username').value;
-        const password = document.getElementById('password').value;
-        
-        try {
-          const response = await fetch('/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password })
-          });
-          
-          if (response.ok) {
-            window.location.href = '/upload';
-          } else {
-            document.getElementById('error').style.display = 'block';
-          }
-        } catch (err) {
-          console.error('登录失败:', err);
-          document.getElementById('error').style.display = 'block';
-        }
-      });
-    </script>
-  </body>
-  </html>`;
+// 页面生成函数
+async function generateLoginPage() {
+  const baseHtml = await loadTemplate('login.html');
+  return render(baseHtml, { pageTitle: '用户登录' });
 }
 
-// 生成文件上传页面 /upload
-function generateUploadPage() {
-  return `<!DOCTYPE html>
-  <html lang="zh-CN">
-  <head>
-  <link rel="shortcut icon" href="https://pan.811520.xyz/2025-02/1739241502-tgfile-favicon.ico" type="image/x-icon">
-  <meta name="description" content="Telegram文件存储与分享平台">
-  <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>文件上传</title>
-    <style>
-      body {
-        font-family: Arial, sans-serif;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        height: 100vh;
-        background: #f5f5f5;
-        margin: 0;
-        background-size: cover;
-        background-position: center;
-        transition: background-image 1s ease-in-out;
-      }
-      .container {
-        max-width: 800px;
-        width: 100%;
-        background: rgba(255, 255, 255, 0.8);
-        backdrop-filter: blur(10px);
-        padding: 10px 40px 20px 40px;
-        border-radius: 8px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        overflow-y: auto;
-        max-height: 90vh;
-      }
-      .header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 10px;
-      }
-      .upload-area {
-        border: 2px dashed #666;
-        padding: 40px;
-        text-align: center;
-        margin: 0 auto 15px auto;
-        border-radius: 8px;
-        transition: all 0.3s;
-        box-sizing: border-box;
-      }
-      .upload-area.dragover {
-        border-color: #007bff;
-        background: #f8f9fa;
-      }
-      .password-area {
-        margin-bottom: 20px;
-      }
-      .password-area input {
-        width: 100%;
-        padding: 10px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        box-sizing: border-box;
-      }
-      .preview-area {
-        margin-top: 20px;
-      }
-      .preview-item {
-        display: flex;
-        align-items: center;
-        padding: 10px;
-        border: 1px solid #ddd;
-        margin-bottom: 10px;
-        border-radius: 4px;
-      }
-      .preview-item img {
-        max-width: 100px;
-        max-height: 100px;
-        margin-right: 10px;
-      }
-      .preview-item .info {
-        flex-grow: 1;
-      }
-      .url-area {
-        margin-top: 10px;
-        width: calc(100% - 20px);
-        box-sizing: border-box;
-      }
-      .url-area textarea {
-        width: 100%;
-        min-height: 100px;
-        padding: 10px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        background: rgba(255, 255, 255, 0.5);
-        color: #333;       
-      }
-      .admin-link {
-        display: inline-block;
-        margin-left: auto;
-        color: #007bff;
-        text-decoration: none;
-      }
-      .admin-link:hover {
-        text-decoration: underline;
-      }
-      .button-group {
-        margin-top: 10px;
-        margin-bottom: 10px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-      .button-container button {
-        margin-right: 10px;
-        padding: 5px 10px;
-        border: none;
-        border-radius: 4px;
-        background: #007bff;
-        color: white;
-        cursor: pointer;
-      }
-      .button-container button:hover {
-        background: #0056b3;
-      }
-      .copyright {
-      margin-left: auto;
-      font-size: 12px;
-      color: #888;
-      }
-      .progress-bar {
-        height: 20px;
-        background: #eee;
-        border-radius: 10px;
-        margin: 8px 0;
-        overflow: hidden;
-        position: relative;
-      }
-      .progress-track {
-        height: 100%;
-        background: #007bff;
-        transition: width 0.3s ease;
-        width: 0;
-      }
-      .progress-text {
-        position: absolute;
-        left: 50%;
-        top: 50%;
-        transform: translate(-50%, -50%);
-        color: white;
-        font-size: 12px;
-        text-shadow: 1px 1px 1px rgba(0,0,0,0.5);
-      }
-      .success .progress-track {
-        background: #28a745;
-      }
-      .error .progress-track {
-        background: #dc3545;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="header">
-        <h1>文件上传</h1>
-        <a href="/admin" class="admin-link">进入管理页面</a>
-      </div>
-      <div class="upload-area" id="uploadArea">
-        <p>点击选择 或 拖拽文件到此处</p>
-        <input type="file" id="fileInput" multiple style="display: none">
-      </div>
-      <div class="password-area">
-        <input type="text" id="passwordInput" placeholder="为文件设置访问密码 (可选)">
-      </div>
-      <div class="preview-area" id="previewArea"></div>
-      <div class="url-area">
-        <textarea id="urlArea" readonly placeholder="上传完成后的链接将显示在这里"></textarea>
-        <div class="button-group">
-          <div class="button-container">
-            <button onclick="copyUrls('url')">复制URL</button>
-            <button onclick="copyUrls('markdown')">复制Markdown</button>
-            <button onclick="copyUrls('html')">复制HTML</button>
-          </div>
-          <div class="copyright">
-            <span>© 2025 Copyright by
-            <a href="https://github.com/yutian81/CF-tgfile" target="_blank" style="text-decoration: none; color: inherit;">yutian81's GitHub</a> | 
-            <a href="https://blog.811520.xyz/" target="_blank" style="text-decoration: none; color: inherit;">青云志</a>
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <script>
-      // 添加背景图相关函数
-      async function setBingBackground() {
-        try {
-          const response = await fetch('/bing');
-          const data = await response.json();
-          if (data.status && data.data && data.data.length > 0) {
-            const randomIndex = Math.floor(Math.random() * data.data.length);
-            document.body.style.backgroundImage = \`url(\${data.data[randomIndex].url})\`;
-          }
-        } catch (error) {
-          console.error('获取背景图失败:', error);
-        }
-      }
-      // 页面加载时设置背景图
-      setBingBackground(); 
-      // 每小时更新一次背景图
-      setInterval(setBingBackground, 3600000);
-
-      const uploadArea = document.getElementById('uploadArea');
-      const fileInput = document.getElementById('fileInput');
-      const passwordInput = document.getElementById('passwordInput');
-      const previewArea = document.getElementById('previewArea');
-      const urlArea = document.getElementById('urlArea');
-      let uploadedUrls = [];
-
-      ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-        uploadArea.addEventListener(eventName, preventDefaults, false);
-        document.body.addEventListener(eventName, preventDefaults, false);
-      });
-
-      function preventDefaults(e) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-
-      ['dragenter', 'dragover'].forEach(eventName => {
-        uploadArea.addEventListener(eventName, highlight, false);
-      });
-
-      ['dragleave', 'drop'].forEach(eventName => {
-        uploadArea.addEventListener(eventName, unhighlight, false);
-      });
-
-      function highlight(e) {
-        uploadArea.classList.add('dragover');
-      }
-
-      function unhighlight(e) {
-        uploadArea.classList.remove('dragover');
-      }
-
-      uploadArea.addEventListener('drop', handleDrop, false);
-      uploadArea.addEventListener('click', () => fileInput.click());
-      fileInput.addEventListener('change', handleFiles);
-
-      function handleDrop(e) {
-        const dt = e.dataTransfer;
-        const files = dt.files;
-        handleFiles({ target: { files } });
-      }
-
-      document.addEventListener('paste', async (e) => {
-        const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-        for (let item of items) {
-          if (item.kind === 'file') {
-            const file = item.getAsFile();
-            await handleFiles({ target: { files: [file] } });
-          }
-        }
-      });
-
-      async function handleFiles(e) {
-        const response = await fetch('/config');
-        if (!response.ok) {
-          throw new Error('Failed to fetch config');
-        }      
-        const config = await response.json();
-        const files = Array.from(e.target.files);
-        for (let file of files) {
-          // 直接在上传前进行大小判断
-          if (file.size > config.maxSizeMB * 1024 * 1024) {
-            alert(\`文件 \${file.name} 超过\${config.maxSizeMB}MB限制\`);
-            continue; // 跳过这个文件，继续处理下一个
-          }
-          await uploadFile(file); // 继续上传
-        }
-      }
-
-      async function uploadFile(file) {
-        const preview = createPreview(file);
-        previewArea.appendChild(preview);
-
-        const xhr = new XMLHttpRequest();
-        const progressTrack = preview.querySelector('.progress-track');
-        const progressText = preview.querySelector('.progress-text');
-
-        xhr.upload.addEventListener('progress', (e) => {
-          if (e.lengthComputable) {
-            const percent = Math.round((e.loaded / e.total) * 100);
-            progressTrack.style.width = \`\${percent}%\`;
-            progressText.textContent = \`\${percent}%\`;
-          }
-        });
-
-        xhr.addEventListener('load', () => {
-          try {
-            const data = JSON.parse(xhr.responseText);
-            const progressText = preview.querySelector('.progress-text');          
-            if (xhr.status >= 200 && xhr.status < 300 && data.status === 1) {
-              progressText.textContent = data.msg;
-              uploadedUrls.push(data.url);
-              updateUrlArea();
-              preview.classList.add('success');
-            } else {
-              const errorMsg = [data.msg, data.error || '未知错误'].filter(Boolean).join(' | ');
-              progressText.textContent = errorMsg;
-              preview.classList.add('error');
-            }
-          } catch (e) {
-            preview.querySelector('.progress-text').textContent = '✗ 响应解析失败';
-            preview.classList.add('error');
-          }
-        });
-
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('password', passwordInput.value); // 新增：添加密码到表单
-        xhr.open('POST', '/upload');
-        xhr.send(formData);
-      }
-
-      function createPreview(file) {
-        const div = document.createElement('div');
-        div.className = 'preview-item';
-        
-        if (file.type.startsWith('image/')) {
-          const img = document.createElement('img');
-          img.src = URL.createObjectURL(file);
-          div.appendChild(img);
-        }
-
-        const info = document.createElement('div');
-        info.className = 'info';
-        info.innerHTML = \`
-          <div>\${file.name}</div>
-          <div>\${formatSize(file.size)}</div>
-          <div class="progress-bar">
-            <div class="progress-track"></div>
-            <span class="progress-text">0%</span>
-          </div>
-        \`;
-        div.appendChild(info);
-
-        return div;
-      }
-
-      function formatSize(bytes) {
-        if (bytes === 0) return '0 B';
-        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-        let size = bytes;
-        let unitIndex = 0;
-        while (size >= 1024 && unitIndex < units.length - 1) {
-          size /= 1024;
-          unitIndex++;
-        }
-        return \`\${size.toFixed(2)} \${units[unitIndex]}\`;
-      }
-
-      function updateUrlArea() {
-        urlArea.value = uploadedUrls.join('\\n');
-      }
-
-      function copyUrls(format) {
-        if (uploadedUrls.length === 0) {
-            alert('没有可复制的链接');
-            return;
-        }
-        let text = '';
-        switch (format) {
-          case 'url':
-            text = uploadedUrls.join('\\n');
-            break;
-          case 'markdown':
-            text = uploadedUrls.map(url => \`![](\${url})\`).join('\\n');
-            break;
-          case 'html':
-            text = uploadedUrls.map(url => \`<img src="\${url}" />\`).join('\\n');
-            break;
-        }
-        navigator.clipboard.writeText(text);
-        alert('已复制到剪贴板');
-      }
-    </script>
-  </body>
-  </html>`;
+async function generateUploadPage() {
+  const baseHtml = await loadTemplate('upload.html');
+  return render(baseHtml, { 
+    pageTitle: '文件上传',
+    githubUrl:'https://github.com/yutian81/CF-tgfile',
+    githubName:'GitHub',
+    blogUrl:'https://blog.811520.xyz/',
+    blogName:'Blog'
+  });
 }
 
-// 生成文件管理页面 /admin
-function generateAdminPage(fileCards, qrModal, editModal, stats) {
-  return `<!DOCTYPE html>
-  <html lang="zh-CN">
-  <head>
-  <link rel="shortcut icon" href="https://pan.811520.xyz/2025-02/1739241502-tgfile-favicon.ico" type="image/x-icon">
-  <meta name="description" content="Telegram文件存储与分享平台">
-  <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>文件管理</title>
-    <style>
-      body {
-        font-family: Arial, sans-serif;
-        margin: 0;
-        padding: 20px;
-        background: #f5f5f5;
-        background-size: cover;
-        background-position: center;
-        transition: background-image 1s ease-in-out;
-      }
-      .container {
-        max-width: 1200px;
-        margin: 0 auto;
-      }
-      .header {
-        background: rgba(255, 255, 255, 0.8);
-        backdrop-filter: blur(10px);
-        padding: 20px 30px;
-        border-radius: 8px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        margin-bottom: 20px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-      .header-left {
-        display: flex;
-        align-items: center;
-        gap: 20px;
-      }
-      h2 { margin: 0; }
-      #stats { 
-        color: red; 
-        font-weight: bold;
-        font-size: 1.2em;
-      }
-      .header-right {
-        display: flex;
-        align-items: center;
-        gap: 15px;
-      }
-      .search {
-        padding: 8px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        width: 250px;
-        background: rgba(255, 255, 255, 0.5);
-      }
-      .backup {
-        color: #007bff;
-        text-decoration: none;
-      }
-      .backup:hover { text-decoration: underline; }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-        gap: 20px;
-      }
-      .file-card {
-        background: rgba(255, 255, 255, 0.8);
-        border-radius: 8px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        overflow: hidden;
-        position: relative;
-        transition: transform 0.2s, box-shadow 0.2s;
-        display: flex;
-        flex-direction: column;
-      }
-      .file-card.selected {
-        transform: translateY(-5px);
-        box-shadow: 0 8px 20px rgba(0, 123, 255, 0.3);
-      }
-      .file-preview {
-        height: 150px;
-        background: rgba(230, 230, 230, 0.5);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .file-preview img, .file-preview video {
-        max-width: 100%;
-        max-height: 100%;
-        object-fit: contain;
-      }
-      .file-info {
-        padding: 10px;
-        font-size: 14px;
-        word-break: break-all;
-        flex-grow: 1;
-      }
-      .file-name {
-        font-weight: bold;
-        margin-bottom: 5px;
-      }
-      .file-password {
-        cursor: pointer;
-        color: #555;
-        font-size: 12px;
-        margin-top: 5px;
-      }
-      .file-password:hover {
-        color: #007bff;
-      }
-      .file-actions {
-        padding: 10px;
-        border-top: 1px solid #eee;
-        display: flex;
-        justify-content: space-around;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 5px;
-      }
-      .file-checkbox {
-        position: absolute;
-        left: 10px;
-        top: 10px;
-        z-index: 10;
-        transform: scale(1.2);
-      }
-      .btn {
-        padding: 5px 10px;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 12px;
-      }
-      .btn-delete { background: #dc3545; color: white; }
-      .btn-copy { background: #007bff; color: white; }
-      .btn-edit { background: #ffc107; color: black; }
-      .btn-down { background: #28a745; color: white; text-decoration: none; }
-      .modal {
-        display: none; position: fixed; top: 0; left: 0;
-        width: 100%; height: 100%;
-        background: rgba(0, 0, 0, 0.5);
-        justify-content: center; align-items: center; z-index: 1000;
-      }
-      .modal-content {
-        background: white; padding: 20px; border-radius: 10px;
-        text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-        width: 90%;
-        max-width: 400px;
-      }
-      #qrcode { margin: 15px 0; }
-      .qr-link-container {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 10px;
-        margin-bottom: 15px;
-        word-break: break-all;
-      }
-      .qr-link-container a {
-        color: #007bff;
-      }
-      .modal-close {
-        padding: 8px 20px; background: #6c757d; color: white;
-        border: none; border-radius: 5px; cursor: pointer;
-      }
-      .form-group {
-        margin-bottom: 15px;
-        text-align: left;
-      }
-      .form-group label {
-        display: block;
-        margin-bottom: 5px;
-      }
-      .form-control {
-        width: 100%;
-        padding: 8px;
-        box-sizing: border-box;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-      }
-      .modal-buttons {
-        display: flex;
-        justify-content: flex-end;
-        gap: 10px;
-      }
-      .btn-save { background: #28a745; color: white; }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="header">
-        <div class="header-left">
-          <h2>文件管理</h2>
-          <div id="stats">共 ${stats.count} 个文件，总大小 ${stats.size}</div>
-        </div>
-        <div class="header-right">
-          <button id="deleteSelectedBtn" class="btn btn-delete" style="display: none;">删除选中</button>
-          <input type="checkbox" id="selectAllCheckbox" title="全选">
-          <a href="/upload" class="backup">返回上传</a>
-          <input type="text" class="search" placeholder="搜索文件..." id="searchInput">
-        </div>
-      </div>
-      <div class="grid" id="fileGrid">
-        ${fileCards}
-      </div>
-      ${qrModal}
-      ${editModal}
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/qrcodejs/qrcode.min.js"></script>
-    <script>
-      // 添加背景图相关函数
-      async function setBingBackground() {
-        try {
-          const response = await fetch('/bing');
-          const data = await response.json();
-          if (data.status && data.data && data.data.length > 0) {
-            const randomIndex = Math.floor(Math.random() * data.data.length);
-            document.body.style.backgroundImage = \`url(\${data.data[randomIndex].url})\`;
-          }
-        } catch (error) {
-          console.error('获取背景图失败:', error);
-        }
-      }
-      // 页面加载时设置背景图
-      setBingBackground(); 
-      // 每小时更新一次背景图
-      setInterval(setBingBackground, 3600000);
-
-      const searchInput = document.getElementById('searchInput');
-      const fileGrid = document.getElementById('fileGrid');
-      
-      searchInput.addEventListener('input', (e) => {
-        const searchTerm = e.target.value.toLowerCase();
-        document.querySelectorAll('.file-card').forEach(card => {
-          const fileName = card.querySelector('.file-name').textContent.toLowerCase();
-          card.style.display = fileName.includes(searchTerm) ? '' : 'none';
-        });
-      });
-
-      // 通用模态框关闭
-      function closeModal(modalId) {
-        document.getElementById(modalId).style.display = 'none';
-      }
-      window.onclick = (event) => {
-        if (event.target.classList.contains('modal')) {
-            event.target.style.display = 'none';
-        }
-      }
-
-      // 通用复制到剪贴板
-      function copyToClipboard(text, message) {
-        if (!text || text === 'null') {
-          alert('没有内容可复制');
-          return;
-        }
-        navigator.clipboard.writeText(text).then(() => alert(message || '已复制'));
-      }
-
-      // 分享二维码功能
-      function showQRCode(url) {
-        const modal = document.getElementById('qrModal');
-        const qrcodeDiv = document.getElementById('qrcode');
-        const qrLink = document.getElementById('qrLink');
-        
-        qrcodeDiv.innerHTML = '';
-        new QRCode(qrcodeDiv, { text: url, width: 200, height: 200 });
-        
-        qrLink.href = url;
-        qrLink.textContent = url;
-
-        modal.style.display = 'flex';
-      }   
-
-      // 编辑文件功能
-      function editFile(url, currentName, currentPassword) {
-        document.getElementById('editFileUrl').value = url;
-        document.getElementById('editFileName').value = currentName;
-        document.getElementById('editFilePassword').value = currentPassword;
-        document.getElementById('editModal').style.display = 'flex';
-      }
-
-      async function saveChanges() {
-        const url = document.getElementById('editFileUrl').value;
-        const fileName = document.getElementById('editFileName').value;
-        const password = document.getElementById('editFilePassword').value;
-
-        try {
-            const response = await fetch('/update', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, fileName, password })
-            });
-            const result = await response.json();
-            if (response.ok && result.success) {
-                alert('更新成功');
-                // 更新页面上的卡片信息
-                const card = document.querySelector(\`[data-url="\${url}"]\`);
-                if (card) {
-                    card.querySelector('.file-name').textContent = fileName;
-                    card.querySelector('a.btn-down').download = fileName;
-                    const passwordDisplay = card.querySelector('.file-password');
-                    passwordDisplay.textContent = password ? \`密码: \${password}\` : '密码: 无';
-                    passwordDisplay.setAttribute('onclick', \`copyToClipboard('\${password}', '密码已复制')\`);
-                    // 更新编辑按钮的参数
-                    card.querySelector('.btn-edit').setAttribute('onclick', \`editFile('\${url}', '\${fileName}', '\${password}')\`);
-                }
-                closeModal('editModal');
-            } else {
-                alert('更新失败: ' + (result.error || '未知错误'));
-            }
-        } catch (error) {
-            alert('请求失败: ' + error.message);
-        }
-      }
-
-      // 单个文件删除功能
-      async function deleteFile(url) {
-        if (!confirm('确定要删除这个文件吗？')) return;
-        await performDelete([url]);
-      }
-
-      // --- 全选和批量删除逻辑 ---
-      const selectAllCheckbox = document.getElementById('selectAllCheckbox');
-      const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
-      const fileCheckboxes = document.querySelectorAll('.file-checkbox');
-
-      function updateSelectionState() {
-        const selectedCheckboxes = document.querySelectorAll('.file-checkbox:checked');
-        const allCheckboxes = document.querySelectorAll('.file-checkbox');
-        
-        if (selectedCheckboxes.length > 0) {
-          deleteSelectedBtn.style.display = 'inline-block';
-          deleteSelectedBtn.textContent = \`删除选中 (\${selectedCheckboxes.length})\`;
-        } else {
-          deleteSelectedBtn.style.display = 'none';
-        }
-
-        if (allCheckboxes.length > 0) {
-            if (selectedCheckboxes.length === allCheckboxes.length) {
-                selectAllCheckbox.checked = true;
-                selectAllCheckbox.indeterminate = false;
-            } else if (selectedCheckboxes.length > 0) {
-                selectAllCheckbox.checked = false;
-                selectAllCheckbox.indeterminate = true;
-            } else {
-                selectAllCheckbox.checked = false;
-                selectAllCheckbox.indeterminate = false;
-            }
-        }
-
-        // 更新卡片样式
-        fileCheckboxes.forEach(cb => {
-            cb.closest('.file-card').classList.toggle('selected', cb.checked);
-        });
-      }
-
-      selectAllCheckbox.addEventListener('change', (e) => {
-        fileCheckboxes.forEach(checkbox => {
-          checkbox.checked = e.target.checked;
-        });
-        updateSelectionState();
-      });
-
-      fileCheckboxes.forEach(checkbox => {
-        checkbox.addEventListener('change', updateSelectionState);
-      });
-
-      deleteSelectedBtn.addEventListener('click', async () => {
-        const selectedUrls = Array.from(document.querySelectorAll('.file-checkbox:checked'))
-          .map(cb => cb.closest('.file-card').dataset.url);
-        
-        if (selectedUrls.length === 0) {
-          alert('请先选择要删除的文件');
-          return;
-        }
-
-        if (!confirm(\`确定要删除选中的 \${selectedUrls.length} 个文件吗？\\n此操作不可恢复！\`)) return;
-        
-        await performDelete(selectedUrls);
-      });
-      
-      async function performDelete(urls) {
-        try {
-          const response = await fetch('/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ urls })
-          });
-
-          if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.error || '删除请求失败');
-          }
-          
-          const resultData = await response.json();
-          let successCount = 0;
-          resultData.results.forEach(res => {
-              if(res.success) {
-                  const card = document.querySelector(\`[data-url="\${res.url}"]\`);
-                  if (card) card.remove();
-                  successCount++;
-              } else {
-                  console.error(\`删除 \${res.url} 失败: \`, res.error);
-              }
-          });
-          alert(\`删除操作完成: \${successCount}个成功, \${urls.length - successCount}个失败。\`);
-          // 更新文件统计
-          location.reload();
-
-        } catch (error) {
-          alert('删除失败: ' + error.message);
-        } finally {
-            updateSelectionState();
-        }
-      }
-      
-      // 初始化状态
-      updateSelectionState();
-    </script>
-  </body>
-  </html>`;
-}
-
-// 新增：生成密码输入页面
-function generatePasswordPage(error = '') {
-  return `<!DOCTYPE html>
-  <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>需要密码</title>
-    <style>
-      body { display: flex; justify-content: center; align-items: center; height: 100vh; background: #f0f2f5; font-family: sans-serif; }
-      .container { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; }
-      h2 { margin-bottom: 20px; }
-      input { width: 100%; padding: 10px; margin-bottom: 20px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-      button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
-      .error { color: red; margin-top: 10px; }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <h2>此文件受密码保护</h2>
-      <form method="POST">
-        <input type="password" name="password" placeholder="请输入密码" required>
-        <button type="submit">提交</button>
-      </form>
-      ${error ? `<p class="error">${error}</p>` : ''}
-    </div>
-  </body>
-  </html>`;
+async function generateAdminPage(fileCards, qrModal, totalFiles, totalSize) {
+  const baseHtml = await loadTemplate('admin.html');
+  return render(baseHtml, {
+    pageTitle: '文件管理',
+    FILE_CARDS: fileCards,
+    QR_MODAL: qrModal,
+    totalFiles: totalFiles,
+    totalSize: totalSize
+  });
 }
