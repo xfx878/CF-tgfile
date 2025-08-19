@@ -50,7 +50,7 @@ export default {
       '/upload': () => handleUploadRequest(request, config),
       '/admin': () => handleAdminRequest(request, config),
       '/delete': () => handleDeleteRequest(request, config),
-      '/edit': () => handleEditRequest(request, config), // 新增编辑路由
+      '/edit': () => handleEditRequest(request, config), // 编辑路由
       '/search': () => handleSearchRequest(request, config),
       '/bing': handleBingImagesRequest
     };
@@ -244,7 +244,7 @@ async function handleAdminRequest(request, config) {
 
   const fileList = files.results || [];
   
-  // 新增：计算文件总数和总大小
+  // 计算文件总数和总大小
   const totalFiles = fileList.length;
   const totalSize = fileList.reduce((sum, file) => sum + (file.file_size || 0), 0);
   const stats = {
@@ -252,18 +252,20 @@ async function handleAdminRequest(request, config) {
     size: formatSize(totalSize)
   };
 
-  const fileCards = fileList.map(file => {
+  const fileCards = fileList.map((file, index) => {
     const fileName = file.file_name;
     const fileSize = formatSize(file.file_size || 0);
     const createdAt = new Date(file.created_at).toISOString().replace('T', ' ').split('.')[0];
+    const cardNumber = `KP_${String(index + 1).padStart(3, '0')}`;
     // 文件预览信息和操作元素
     return `
       <div class="file-card" data-url="${file.url}">
         <input type="checkbox" class="file-checkbox">
-        <div class="file-preview">
-          ${getPreviewHtml(file.url)}
+        <div class="file-preview" onclick="openMediaViewer('${file.url}', '${file.mime_type}')">
+          ${getPreviewHtml(file.url, file.mime_type)}
         </div>
         <div class="file-info">
+          <div class="card-number">${cardNumber}</div>
           <div>${fileName}</div>
           <div>${fileSize}</div>
           <div>${createdAt}</div>
@@ -290,8 +292,16 @@ async function handleAdminRequest(request, config) {
       </div>
     </div>
   `;
+  
+  // 新增：媒体查看器元素
+  const mediaViewerModal = `
+    <div id="mediaViewer" class="media-viewer">
+      <span class="close-viewer" onclick="closeMediaViewer()">&times;</span>
+      <div class="media-content" id="mediaContent"></div>
+    </div>
+  `;
 
-  const html = generateAdminPage(fileCards, qrModal, stats);
+  const html = generateAdminPage(fileCards, qrModal, mediaViewerModal, stats);
   return new Response(html, {
     headers: { 'Content-Type': 'text/html;charset=UTF-8' }
   });
@@ -329,18 +339,17 @@ async function handleSearchRequest(request, config) {
 }
 
 // 支持预览的文件类型
-function getPreviewHtml(url) {
-  const ext = (url.split('.').pop() || '').toLowerCase();
-  const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'icon'].includes(ext);
-  const isVideo = ['mp4', 'webm'].includes(ext);
-  const isAudio = ['mp3', 'wav', 'ogg'].includes(ext);
+function getPreviewHtml(url, mimeType) {
+  const isImage = mimeType && mimeType.startsWith('image/');
+  const isVideo = mimeType && mimeType.startsWith('video/');
+  const isAudio = mimeType && mimeType.startsWith('audio/');
 
   if (isImage) {
     return `<img src="${url}" alt="预览" loading="lazy">`;
   } else if (isVideo) {
-    return `<video src="${url}" controls></video>`;
+    return `<video src="${url}"></video>`; // 移除controls，点击预览区播放
   } else if (isAudio) {
-    return `<audio src="${url}" controls></audio>`;
+    return `<div style="font-size: 48px">🎵</div>`; // 音频显示一个图标
   } else {
     return `<div style="font-size: 48px">📄</div>`;
   }
@@ -437,7 +446,7 @@ async function handleFileRequest(request, config) {
   }
 }
 
-// 新增：处理文件名修改请求
+// 处理文件名修改请求
 async function handleEditRequest(request, config) {
     if (config.enableAuth && !authenticate(request, config)) {
         return new Response(JSON.stringify({ error: '未授权' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
@@ -550,7 +559,6 @@ function getContentType(ext) {
     json: 'application/json', xml: 'application/xml', ini: 'text/plain',
     js: 'application/javascript', yml: 'application/yaml', yaml: 'application/yaml',
     py: 'text/x-python', sh: 'application/x-sh',
-    // 添加更多办公和常见文件类型
     doc: 'application/msword',
     docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     xls: 'application/vnd.ms-excel',
@@ -1115,7 +1123,7 @@ function generateUploadPage() {
 }
 
 // 生成文件管理页面 /admin
-function generateAdminPage(fileCards, qrModal, stats) {
+function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
   return `<!DOCTYPE html>
   <html lang="zh-CN">
   <head>
@@ -1190,6 +1198,8 @@ function generateAdminPage(fileCards, qrModal, stats) {
         overflow: hidden;
         position: relative;
         transition: transform 0.2s, box-shadow 0.2s;
+        display: flex;
+        flex-direction: column;
       }
       .file-card.selected {
         transform: translateY(-5px);
@@ -1201,16 +1211,25 @@ function generateAdminPage(fileCards, qrModal, stats) {
         display: flex;
         align-items: center;
         justify-content: center;
+        cursor: pointer;
+        overflow: hidden;
       }
       .file-preview img, .file-preview video {
         max-width: 100%;
         max-height: 100%;
-        object-fit: contain;
+        object-fit: cover;
       }
       .file-info {
         padding: 10px;
         font-size: 14px;
         word-break: break-all;
+        flex-grow: 1;
+      }
+      .card-number {
+        font-size: 12px;
+        color: #888;
+        font-weight: bold;
+        margin-bottom: 5px;
       }
       .file-actions {
         padding: 10px;
@@ -1253,6 +1272,47 @@ function generateAdminPage(fileCards, qrModal, stats) {
         padding: 8px 20px; background: #007bff; color: white;
         border: none; border-radius: 5px; cursor: pointer;
       }
+      /* 新增媒体查看器样式 */
+      .media-viewer {
+        display: none;
+        position: fixed;
+        top: 0; left: 0;
+        width: 100%; height: 100%;
+        background-color: rgba(0, 0, 0, 0.85);
+        justify-content: center;
+        align-items: center;
+        z-index: 2000;
+        overflow: hidden;
+      }
+      .close-viewer {
+        position: absolute;
+        top: 20px; right: 35px;
+        font-size: 40px;
+        color: #fff;
+        cursor: pointer;
+        transition: color 0.3s;
+      }
+      .close-viewer:hover { color: #bbb; }
+      .media-content {
+        max-width: 90vw;
+        max-height: 90vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+      .media-content img {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        cursor: grab;
+        transition: transform 0.2s ease-out;
+      }
+      .media-content img.zooming { cursor: grabbing; }
+      .media-content video, .media-content audio {
+        max-width: 100%;
+        max-height: 100%;
+        outline: none;
+      }
     </style>
   </head>
   <body>
@@ -1273,6 +1333,7 @@ function generateAdminPage(fileCards, qrModal, stats) {
         ${fileCards}
       </div>
       ${qrModal}
+      ${mediaViewerModal}
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/qrcodejs/qrcode.min.js"></script>
@@ -1290,18 +1351,14 @@ function generateAdminPage(fileCards, qrModal, stats) {
           console.error('获取背景图失败:', error);
         }
       }
-      // 页面加载时设置背景图
       setBingBackground(); 
-      // 每小时更新一次背景图
       setInterval(setBingBackground, 3600000);
 
       const searchInput = document.getElementById('searchInput');
-      const fileGrid = document.getElementById('fileGrid');
-      
       searchInput.addEventListener('input', (e) => {
         const searchTerm = e.target.value.toLowerCase();
         document.querySelectorAll('.file-card').forEach(card => {
-          const fileName = card.querySelector('.file-info div:first-child').textContent.toLowerCase();
+          const fileName = card.querySelector('.file-info div:nth-child(2)').textContent.toLowerCase();
           card.style.display = fileName.includes(searchTerm) ? '' : 'none';
         });
       });
@@ -1324,10 +1381,18 @@ function generateAdminPage(fileCards, qrModal, stats) {
       function closeQRModal() {
         document.getElementById('qrModal').style.display = 'none';
       }      
-      window.onclick = (event) => {
-        const modal = document.getElementById('qrModal');
-        if (event.target === modal) modal.style.display = 'none';
-      }
+      window.addEventListener('click', (event) => {
+        if (event.target === document.getElementById('qrModal')) closeQRModal();
+        if (event.target === document.getElementById('mediaViewer')) closeMediaViewer();
+      });
+      
+      // ESC键关闭
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeQRModal();
+            closeMediaViewer();
+        }
+      });
 
       // 单个文件删除功能
       async function deleteFile(url) {
@@ -1335,7 +1400,7 @@ function generateAdminPage(fileCards, qrModal, stats) {
         await performDelete([url]);
       }
       
-      // 新增：编辑文件名功能
+      // 编辑文件名功能
       async function editFileName(url, currentName) {
         const newName = prompt('请输入新的文件名:', currentName);
         if (newName && newName.trim() !== '' && newName !== currentName) {
@@ -1350,7 +1415,7 @@ function generateAdminPage(fileCards, qrModal, stats) {
                     alert('文件名修改成功');
                     const card = document.querySelector(\`[data-url="\${url}"]\`);
                     if (card) {
-                        card.querySelector('.file-info div:first-child').textContent = newName;
+                        card.querySelector('.file-info div:nth-child(2)').textContent = newName;
                         card.querySelector('.btn-down').setAttribute('download', newName);
                     }
                 } else {
@@ -1362,6 +1427,81 @@ function generateAdminPage(fileCards, qrModal, stats) {
         }
       }
 
+      // --- 媒体查看器逻辑 ---
+      const mediaViewer = document.getElementById('mediaViewer');
+      const mediaContent = document.getElementById('mediaContent');
+      let scale = 1, isPanning = false, startX = 0, startY = 0, translateX = 0, translateY = 0;
+
+      function openMediaViewer(url, mimeType) {
+        mediaContent.innerHTML = '';
+        let element;
+        if (mimeType.startsWith('image/')) {
+            element = document.createElement('img');
+            element.src = url;
+            element.addEventListener('wheel', handleZoom);
+            element.addEventListener('mousedown', startPan);
+            element.addEventListener('mousemove', pan);
+            element.addEventListener('mouseup', endPan);
+            element.addEventListener('mouseleave', endPan);
+        } else if (mimeType.startsWith('video/')) {
+            element = document.createElement('video');
+            element.src = url;
+            element.controls = true;
+            element.autoplay = true;
+        } else if (mimeType.startsWith('audio/')) {
+            element = document.createElement('audio');
+            element.src = url;
+            element.controls = true;
+            element.autoplay = true;
+        }
+        if (element) {
+            mediaContent.appendChild(element);
+            mediaViewer.style.display = 'flex';
+        }
+      }
+      
+      function closeMediaViewer() {
+          mediaViewer.style.display = 'none';
+          mediaContent.innerHTML = ''; // 停止播放并清空内容
+          resetZoomAndPan();
+      }
+
+      function handleZoom(e) {
+          e.preventDefault();
+          scale += e.deltaY * -0.01;
+          scale = Math.min(Math.max(0.5, scale), 4); // 限制缩放范围
+          e.target.style.transform = \`translate(\${translateX}px, \${translateY}px) scale(\${scale})\`;
+      }
+      
+      function startPan(e) {
+          if (scale === 1) return;
+          e.preventDefault();
+          isPanning = true;
+          startX = e.clientX - translateX;
+          startY = e.clientY - translateY;
+          e.target.classList.add('zooming');
+      }
+
+      function pan(e) {
+          if (!isPanning) return;
+          e.preventDefault();
+          translateX = e.clientX - startX;
+          translateY = e.clientY - startY;
+          e.target.style.transform = \`translate(\${translateX}px, \${translateY}px) scale(\${scale})\`;
+      }
+
+      function endPan(e) {
+          isPanning = false;
+          e.target.classList.remove('zooming');
+      }
+      
+      function resetZoomAndPan() {
+          scale = 1;
+          isPanning = false;
+          translateX = 0;
+          translateY = 0;
+      }
+
       // --- 全选和批量删除逻辑 ---
       const selectAllCheckbox = document.getElementById('selectAllCheckbox');
       const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
@@ -1371,27 +1511,14 @@ function generateAdminPage(fileCards, qrModal, stats) {
         const selectedCheckboxes = document.querySelectorAll('.file-checkbox:checked');
         const allCheckboxes = document.querySelectorAll('.file-checkbox');
         
-        if (selectedCheckboxes.length > 0) {
-          deleteSelectedBtn.style.display = 'inline-block';
-          deleteSelectedBtn.textContent = \`删除选中 (\${selectedCheckboxes.length})\`;
-        } else {
-          deleteSelectedBtn.style.display = 'none';
-        }
+        deleteSelectedBtn.style.display = selectedCheckboxes.length > 0 ? 'inline-block' : 'none';
+        deleteSelectedBtn.textContent = \`删除选中 (\${selectedCheckboxes.length})\`;
 
         if (allCheckboxes.length > 0) {
-            if (selectedCheckboxes.length === allCheckboxes.length) {
-                selectAllCheckbox.checked = true;
-                selectAllCheckbox.indeterminate = false;
-            } else if (selectedCheckboxes.length > 0) {
-                selectAllCheckbox.checked = false;
-                selectAllCheckbox.indeterminate = true;
-            } else {
-                selectAllCheckbox.checked = false;
-                selectAllCheckbox.indeterminate = false;
-            }
+            selectAllCheckbox.checked = selectedCheckboxes.length === allCheckboxes.length;
+            selectAllCheckbox.indeterminate = selectedCheckboxes.length > 0 && selectedCheckboxes.length < allCheckboxes.length;
         }
 
-        // 更新卡片样式
         fileCheckboxes.forEach(cb => {
             cb.closest('.file-card').classList.toggle('selected', cb.checked);
         });
@@ -1455,7 +1582,6 @@ function generateAdminPage(fileCards, qrModal, stats) {
         }
       }
       
-      // 初始化状态
       updateSelectionState();
     </script>
   </body>
