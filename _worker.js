@@ -257,11 +257,13 @@ async function handleAdminRequest(request, config) {
     const fileSize = formatSize(file.file_size || 0);
     const createdAt = new Date(file.created_at).toISOString().replace('T', ' ').split('.')[0];
     const cardNumber = `KP_${String(index + 1).padStart(3, '0')}`;
+    // [MODIFIED] 修复文件名中可能存在的单引号问题，并传递文件名到 openMediaViewer
+    const safeFileName = fileName.replace(/'/g, "\\'");
     // 文件预览信息和操作元素
     return `
       <div class="file-card" data-url="${file.url}">
         <input type="checkbox" class="file-checkbox">
-        <div class="file-preview" onclick="openMediaViewer('${file.url}', '${file.mime_type}')">
+        <div class="file-preview" onclick="openMediaViewer('${file.url}', '${file.mime_type}', '${safeFileName}')">
           ${getPreviewHtml(file.url, file.mime_type)}
         </div>
         <div class="file-info">
@@ -272,7 +274,7 @@ async function handleAdminRequest(request, config) {
         </div>
         <div class="file-actions">
           <button class="btn btn-copy" onclick="showQRCode('${file.url}')">分享</button>
-          <button class="btn btn-edit" onclick="editFileName(this, '${file.url}', '${fileName}')">编辑</button>
+          <button class="btn btn-edit" onclick="editFileName(this, '${file.url}', '${safeFileName}')">编辑</button>
           <a class="btn btn-down" href="${file.url}" download="${fileName}">下载</a>
           <button class="btn btn-delete" onclick="deleteFile('${file.url}')">删除</button>
         </div>
@@ -293,11 +295,12 @@ async function handleAdminRequest(request, config) {
     </div>
   `;
   
-  // 新增：媒体查看器元素
+  // [MODIFIED] 媒体查看器元素，增加下载链接容器
   const mediaViewerModal = `
     <div id="mediaViewer" class="media-viewer">
       <span class="close-viewer" onclick="closeMediaViewer()">&times;</span>
       <div class="media-content" id="mediaContent"></div>
+      <div class="media-actions-viewer" id="mediaActionsViewer"></div>
     </div>
   `;
 
@@ -429,6 +432,7 @@ async function handleFileRequest(request, config) {
         'Cache-Control': 'public, max-age=31536000',
         'X-Content-Type-Options': 'nosniff',
         'Access-Control-Allow-Origin': '*',
+        // [FIXED] 这里的 file.file_name 会在修改后从数据库获取最新的，确保下载名称正确
         'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(file.file_name || '')}`
       }
     });
@@ -446,7 +450,7 @@ async function handleFileRequest(request, config) {
   }
 }
 
-// [FIXED] 处理文件名修改请求
+// [VERIFIED] 处理文件名修改请求，并清除缓存以确保下载名称更新
 async function handleEditRequest(request, config) {
     if (config.enableAuth && !authenticate(request, config)) {
         return new Response(JSON.stringify({ error: '未授权' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
@@ -483,7 +487,7 @@ async function handleEditRequest(request, config) {
         ).bind(newName, url).run();
 
         if (result.meta.changes > 0) {
-            // [FIX] 修复下载文件名问题：清除该URL的缓存
+            // [FIX] 修复下载文件名问题的关键：清除该URL的缓存
             const cache = caches.default;
             await cache.delete(new Request(url));
             console.log(`[Cache Purged] ${url}`);
@@ -1307,7 +1311,7 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
         padding: 8px 20px; background: #007bff; color: white;
         border: none; border-radius: 5px; cursor: pointer;
       }
-      /* 新增媒体查看器样式 */
+      /* 媒体查看器样式 */
       .media-viewer {
         display: none;
         position: fixed;
@@ -1348,6 +1352,27 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
         max-height: 100%;
         outline: none;
       }
+      /* [NEW] 预览器中下载链接的样式 */
+      .media-actions-viewer {
+        position: absolute;
+        bottom: 30px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2001;
+      }
+      .btn-down-viewer {
+        padding: 10px 20px;
+        background: #28a745;
+        color: white;
+        text-decoration: none;
+        border-radius: 5px;
+        opacity: 0.8;
+        transition: opacity 0.3s;
+        font-size: 14px;
+      }
+      .btn-down-viewer:hover {
+        opacity: 1;
+      }
     </style>
   </head>
   <body>
@@ -1361,7 +1386,6 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
           <button id="deleteSelectedBtn" class="btn btn-delete" style="display: none;">删除选中</button>
           <input type="checkbox" id="selectAllCheckbox" title="全选">
           <a href="/upload" class="backup">返回上传</a>
-          <!-- [NEW] 新增刷新按钮 -->
           <button id="refreshBtn" class="btn" style="background-color: #17a2b8; color: white;">刷新</button>
           <div class="search-container">
             <input type="text" class="search" placeholder="搜索文件名或编号..." id="searchInput">
@@ -1394,7 +1418,6 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
       setBingBackground(); 
       setInterval(setBingBackground, 3600000);
 
-      // [NEW] 刷新按钮的事件监听
       document.getElementById('refreshBtn').addEventListener('click', () => {
         location.reload();
       });
@@ -1482,7 +1505,7 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
                         if(downloadLink) {
                            downloadLink.setAttribute('download', newFullName);
                         }
-                        buttonElement.setAttribute('onclick', \`editFileName(this, '\${url}', '\${newFullName}')\`);
+                        buttonElement.setAttribute('onclick', \`editFileName(this, '\${url}', '\${newFullName.replace(/'/g, "\\\\'")}')\`);
                     }
                 } else {
                     throw new Error(result.error || '修改失败');
@@ -1496,11 +1519,16 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
       // --- 媒体查看器逻辑 ---
       const mediaViewer = document.getElementById('mediaViewer');
       const mediaContent = document.getElementById('mediaContent');
+      // [NEW] 获取媒体操作容器
+      const mediaActionsViewer = document.getElementById('mediaActionsViewer');
       let scale = 1, isPanning = false, startX = 0, startY = 0, translateX = 0, translateY = 0;
 
-      function openMediaViewer(url, mimeType) {
+      // [MODIFIED] 增加 fileName 参数，用于创建下载链接
+      function openMediaViewer(url, mimeType, fileName) {
         mediaContent.innerHTML = '';
+        mediaActionsViewer.innerHTML = ''; // 清空旧的下载链接
         let element;
+
         if (mimeType.startsWith('image/')) {
             element = document.createElement('img');
             element.src = url;
@@ -1520,8 +1548,18 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
             element.controls = true;
             element.autoplay = true;
         }
+
         if (element) {
             mediaContent.appendChild(element);
+            
+            // [NEW] 创建并添加下载链接
+            const downloadLink = document.createElement('a');
+            downloadLink.href = url;
+            downloadLink.textContent = \`下载 (\${fileName})\`;
+            downloadLink.download = fileName; // 关键属性，指定下载文件名
+            downloadLink.className = 'btn-down-viewer';
+            mediaActionsViewer.appendChild(downloadLink);
+            
             mediaViewer.style.display = 'flex';
         }
       }
@@ -1529,6 +1567,7 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
       function closeMediaViewer() {
           mediaViewer.style.display = 'none';
           mediaContent.innerHTML = ''; // 停止播放并清空内容
+          mediaActionsViewer.innerHTML = ''; // 清空下载链接
           resetZoomAndPan();
       }
 
