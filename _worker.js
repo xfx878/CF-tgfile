@@ -272,7 +272,7 @@ async function handleAdminRequest(request, config) {
         </div>
         <div class="file-actions">
           <button class="btn btn-copy" onclick="showQRCode('${file.url}')">分享</button>
-          <button class="btn btn-edit" onclick="editFileName('${file.url}', '${fileName}')">编辑</button>
+          <button class="btn btn-edit" onclick="editFileName(this, '${file.url}', '${fileName}')">编辑</button>
           <a class="btn btn-down" href="${file.url}" download="${fileName}">下载</a>
           <button class="btn btn-delete" onclick="deleteFile('${file.url}')">删除</button>
         </div>
@@ -1428,22 +1428,33 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
       }
       
       // 编辑文件名功能
-      async function editFileName(url, currentName) {
-        const newName = prompt('请输入新的文件名:', currentName);
-        if (newName && newName.trim() !== '' && newName !== currentName) {
+      async function editFileName(buttonElement, url, currentName) {
+        const lastDotIndex = currentName.lastIndexOf('.');
+        const baseName = lastDotIndex !== -1 ? currentName.substring(0, lastDotIndex) : currentName;
+        const extension = lastDotIndex !== -1 ? currentName.substring(lastDotIndex) : '';
+
+        const newBaseName = prompt('请输入新的文件名:', baseName);
+
+        if (newBaseName && newBaseName.trim() !== '' && newBaseName !== baseName) {
+            const newFullName = newBaseName + extension;
             try {
                 const response = await fetch('/edit', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, newName })
+                    body: JSON.stringify({ url: url, newName: newFullName })
                 });
                 const result = await response.json();
                 if (response.ok && result.success) {
                     alert('文件名修改成功');
-                    const card = document.querySelector(\`[data-url="\${url}"]\`);
+                    const card = buttonElement.closest('.file-card');
                     if (card) {
-                        card.querySelector('.file-info div:nth-child(2)').textContent = newName;
-                        card.querySelector('.btn-down').setAttribute('download', newName);
+                        card.querySelector('.file-info div:nth-child(2)').textContent = newFullName;
+                        const downloadLink = card.querySelector('.btn-down');
+                        if(downloadLink) {
+                           downloadLink.setAttribute('download', newFullName);
+                        }
+                        // Also update the onclick attribute for the edit button itself
+                        buttonElement.setAttribute('onclick', \`editFileName(this, '\${url}', '\${newFullName}')\`);
                     }
                 } else {
                     throw new Error(result.error || '修改失败');
