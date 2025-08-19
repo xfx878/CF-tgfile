@@ -1174,12 +1174,25 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
         align-items: center;
         gap: 15px;
       }
+      .search-container {
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
       .search {
-        padding: 8px;
+        padding: 8px 24px 8px 8px; /* Add padding for clear button */
         border: 1px solid #ddd;
         border-radius: 4px;
         width: 250px;
         background: rgba(255, 255, 255, 0.5);
+      }
+      #clearSearchBtn {
+        position: absolute;
+        right: 8px;
+        cursor: pointer;
+        color: #888;
+        font-size: 20px;
+        display: none; /* Initially hidden */
       }
       .backup {
         color: #007bff;
@@ -1226,8 +1239,8 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
         flex-grow: 1;
       }
       .card-number {
-        font-size: 12px;
-        color: #888;
+        font-size: 14px;
+        color: red;
         font-weight: bold;
         margin-bottom: 5px;
       }
@@ -1326,7 +1339,10 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
           <button id="deleteSelectedBtn" class="btn btn-delete" style="display: none;">删除选中</button>
           <input type="checkbox" id="selectAllCheckbox" title="全选">
           <a href="/upload" class="backup">返回上传</a>
-          <input type="text" class="search" placeholder="搜索文件..." id="searchInput">
+          <div class="search-container">
+            <input type="text" class="search" placeholder="搜索文件名或编号..." id="searchInput">
+            <span id="clearSearchBtn">&times;</span>
+          </div>
         </div>
       </div>
       <div class="grid" id="fileGrid">
@@ -1355,12 +1371,23 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
       setInterval(setBingBackground, 3600000);
 
       const searchInput = document.getElementById('searchInput');
+      const clearSearchBtn = document.getElementById('clearSearchBtn');
+      
       searchInput.addEventListener('input', (e) => {
         const searchTerm = e.target.value.toLowerCase();
+        clearSearchBtn.style.display = searchTerm ? 'block' : 'none';
+
         document.querySelectorAll('.file-card').forEach(card => {
           const fileName = card.querySelector('.file-info div:nth-child(2)').textContent.toLowerCase();
-          card.style.display = fileName.includes(searchTerm) ? '' : 'none';
+          const cardNumber = card.querySelector('.card-number').textContent.toLowerCase();
+          const isVisible = fileName.includes(searchTerm) || cardNumber.includes(searchTerm);
+          card.style.display = isVisible ? '' : 'none';
         });
+      });
+
+      clearSearchBtn.addEventListener('click', () => {
+        searchInput.value = '';
+        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
       });
 
       // 分享二维码功能
