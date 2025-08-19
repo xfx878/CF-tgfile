@@ -446,7 +446,7 @@ async function handleFileRequest(request, config) {
   }
 }
 
-// 处理文件名修改请求
+// [FIXED] 处理文件名修改请求
 async function handleEditRequest(request, config) {
     if (config.enableAuth && !authenticate(request, config)) {
         return new Response(JSON.stringify({ error: '未授权' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
@@ -461,23 +461,46 @@ async function handleEditRequest(request, config) {
             });
         }
 
+        // 检查文件是否存在
+        const existingFile = await config.database.prepare(
+            'SELECT file_name FROM files WHERE url = ?'
+        ).bind(url).first();
+
+        if (!existingFile) {
+            return new Response(JSON.stringify({ error: '文件不存在' }), {
+                status: 404,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        // 检查文件名是否真的改变了
+        if (existingFile.file_name === newName) {
+            return new Response(JSON.stringify({ error: '新旧文件名相同，无需修改' }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        // 执行更新操作
         const result = await config.database.prepare(
             'UPDATE files SET file_name = ? WHERE url = ?'
         ).bind(newName, url).run();
 
-        if (result.changes > 0) {
+        // D1 .run() 的返回结果中，变更信息在 result.meta.changes
+        if (result.meta.changes > 0) {
             return new Response(JSON.stringify({ success: true, message: '文件名修改成功' }), {
                 headers: { 'Content-Type': 'application/json' }
             });
         } else {
-            return new Response(JSON.stringify({ error: '文件不存在或无需修改' }), {
-                status: 404,
+            // 理论上，经过前面的检查，不应该会到这里
+            return new Response(JSON.stringify({ error: '修改失败，未知原因' }), {
+                status: 500,
                 headers: { 'Content-Type': 'application/json' }
             });
         }
     } catch (error) {
         console.error(`[Edit Error] ${error.message}`);
-        return new Response(JSON.stringify({ error: error.message }), {
+        return new Response(JSON.stringify({ error: '服务器内部错误: ' + error.message }), {
             status: 500,
             headers: { 'Content-Type': 'application/json' }
         });
@@ -1582,7 +1605,7 @@ function generateAdminPage(fileCards, qrModal, mediaViewerModal, stats) {
           return;
         }
 
-        if (!confirm(\`确定要删除选中的 \${selectedUrls.length} 个文件吗？\n此操作不可恢复！\`)) return;
+        if (!confirm(\`确定要删除选中的 \${selectedUrls.length} 个文件吗？\\n此操作不可恢复！\`)) return;
         
         await performDelete(selectedUrls);
       });
