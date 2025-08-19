@@ -190,8 +190,6 @@ async function handleUploadRequest(request, config) {
     const time = Date.now();
     const timestamp = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
     const url = `https://${config.domain}/${time}.${ext}`;
-    // const datetime = timestamp.split('T')[0].replace(/-/g, ''); // 获取ISO时间戳的纯数字日期
-    // const url = `https://${config.domain}/${datetime}-${time}.${ext}`; 
     
     await config.database.prepare(`
       INSERT INTO files (url, fileId, message_id, created_at, file_name, file_size, mime_type) 
@@ -244,6 +242,15 @@ async function handleAdminRequest(request, config) {
   ).all();
 
   const fileList = files.results || [];
+  
+  // 新增：计算文件总数和总大小
+  const totalFiles = fileList.length;
+  const totalSize = fileList.reduce((sum, file) => sum + (file.file_size || 0), 0);
+  const stats = {
+    count: totalFiles,
+    size: formatSize(totalSize)
+  };
+
   const fileCards = fileList.map(file => {
     const fileName = file.file_name;
     const fileSize = formatSize(file.file_size || 0);
@@ -251,8 +258,7 @@ async function handleAdminRequest(request, config) {
     // 文件预览信息和操作元素
     return `
       <div class="file-card" data-url="${file.url}">
-        <!-- 这是一个复选框元素 -->
-        <!-- <input type="checkbox" class="file-checkbox"> -->
+        <input type="checkbox" class="file-checkbox">
         <div class="file-preview">
           ${getPreviewHtml(file.url)}
         </div>
@@ -283,7 +289,7 @@ async function handleAdminRequest(request, config) {
     </div>
   `;
 
-  const html = generateAdminPage(fileCards, qrModal);
+  const html = generateAdminPage(fileCards, qrModal, stats);
   return new Response(html, {
     headers: { 'Content-Type': 'text/html;charset=UTF-8' }
   });
@@ -328,7 +334,7 @@ function getPreviewHtml(url) {
   const isAudio = ['mp3', 'wav', 'ogg'].includes(ext);
 
   if (isImage) {
-    return `<img src="${url}" alt="预览">`;
+    return `<img src="${url}" alt="预览" loading="lazy">`;
   } else if (isVideo) {
     return `<video src="${url}" controls></video>`;
   } else if (isAudio) {
@@ -432,92 +438,85 @@ async function handleFileRequest(request, config) {
 // 处理文件删除
 async function handleDeleteRequest(request, config) {
   if (config.enableAuth && !authenticate(request, config)) {
-    return Response.redirect(`${new URL(request.url).origin}/`, 302);
+    return new Response(JSON.stringify({ error: '未授权' }), { status: 401 });
   }
 
   try {
-    const { url } = await request.json();
-    if (!url || typeof url !== 'string') {
-      return new Response(JSON.stringify({ error: '无效的URL' }), {
+    const { urls } = await request.json();
+    if (!urls || !Array.isArray(urls) || urls.length === 0) {
+      return new Response(JSON.stringify({ error: '无效的URL列表' }), {
         status: 400, 
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    const file = await config.database.prepare(
-      'SELECT fileId, message_id FROM files WHERE url = ?'
-    ).bind(url).first();    
-    if (!file) {
-      return new Response(JSON.stringify({ error: '文件不存在' }), { 
-        status: 404, 
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }    
+    const results = [];
+    for (const url of urls) {
+      const file = await config.database.prepare(
+        'SELECT fileId, message_id FROM files WHERE url = ?'
+      ).bind(url).first();
 
-    let deleteError = null;
-
-    try {
-      const deleteResponse = await fetch(
-        `https://api.telegram.org/bot${config.tgBotToken}/deleteMessage?chat_id=${config.tgChatId}&message_id=${file.message_id}`
-      );
-      if (!deleteResponse.ok) {
-        const errorData = await deleteResponse.json();
-        console.error(`[Telegram API Error] ${JSON.stringify(errorData)}`);
-        throw new Error(`Telegram 消息删除失败: ${errorData.description}`);
+      if (!file) {
+        results.push({ url, success: false, error: '文件不存在' });
+        continue;
       }
-    } catch (error) { deleteError = error.message; }
 
-    // 删除数据库表数据，即使Telegram删除失败也会删除数据库记录
-    await config.database.prepare('DELETE FROM files WHERE url = ?').bind(url).run();
+      let deleteError = null;
+      try {
+        const deleteResponse = await fetch(
+          `https://api.telegram.org/bot${config.tgBotToken}/deleteMessage?chat_id=${config.tgChatId}&message_id=${file.message_id}`
+        );
+        if (!deleteResponse.ok) {
+          const errorData = await deleteResponse.json();
+          throw new Error(errorData.description || 'Telegram API 错误');
+        }
+      } catch (error) {
+        deleteError = error.message;
+      }
+
+      await config.database.prepare('DELETE FROM files WHERE url = ?').bind(url).run();
+
+      if (deleteError) {
+        results.push({ url, success: true, message: `数据库记录已删除，但TG消息删除失败: ${deleteError}` });
+      } else {
+        results.push({ url, success: true, message: '文件删除成功' });
+      }
+    }
     
-    return new Response(
-      JSON.stringify({ 
-        success: true,
-        message: deleteError ? `文件已从数据库删除，但Telegram消息删除失败: ${deleteError}` : '文件删除成功'
-      }),
-      { headers: { 'Content-Type': 'application/json' }}
-    );
+    return new Response(JSON.stringify({ results }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
 
   } catch (error) {
     console.error(`[Delete Error] ${error.message}`);
     return new Response(
-      JSON.stringify({ 
-        error: error.message.includes('message to delete not found') ? 
-              '文件已从频道移除' : error.message 
-      }),
+      JSON.stringify({ error: error.message }),
       { status: 500, headers: { 'Content-Type': 'application/json' }}
     );
   }
 }
 
+
 // 支持上传的文件类型
 function getContentType(ext) {
   const types = {
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg', 
-    png: 'image/png',
-    gif: 'image/gif',
-    webp: 'image/webp',
-    svg: 'image/svg+xml',
-    icon: 'image/x-icon',
-    mp4: 'video/mp4',
-    webm: 'video/webm',
-    mp3: 'audio/mpeg',
-    wav: 'audio/wav',
-    ogg: 'audio/ogg',
-    pdf: 'application/pdf',
-    txt: 'text/plain',
-    md: 'text/markdown',
-    zip: 'application/zip',
-    rar: 'application/x-rar-compressed',
-    json: 'application/json',
-    xml: 'application/xml',
-    ini: 'text/plain',
-    js: 'application/javascript',
-    yml: 'application/yaml',
-    yaml: 'application/yaml',
-    py: 'text/x-python',
-    sh: 'application/x-sh'
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+    webp: 'image/webp', svg: 'image/svg+xml', icon: 'image/x-icon',
+    mp4: 'video/mp4', webm: 'video/webm',
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown',
+    zip: 'application/zip', rar: 'application/x-rar-compressed',
+    json: 'application/json', xml: 'application/xml', ini: 'text/plain',
+    js: 'application/javascript', yml: 'application/yaml', yaml: 'application/yaml',
+    py: 'text/x-python', sh: 'application/x-sh',
+    // 添加更多办公和常见文件类型
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '7z': 'application/x-7z-compressed'
   };
   return types[ext] || 'application/octet-stream';
 }
@@ -563,7 +562,8 @@ async function handleBingImagesRequest() {
 
 // 文件大小计算函数
 function formatSize(bytes) {
-    const units = ['B', 'KB', 'MB', 'GB'];
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     let size = bytes;
     let unitIndex = 0;
     while (size >= 1024 && unitIndex < units.length - 1) {
@@ -591,9 +591,13 @@ function generateLoginPage() {
         height: 100vh;
         background: #f5f5f5;
         font-family: Arial, sans-serif;
+        background-size: cover;
+        background-position: center;
+        transition: background-image 1s ease-in-out;
       }
       .login-container {
-        background: rgba(255, 255, 255, 0.7);
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(10px);
         padding: 20px;
         border-radius: 8px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
@@ -652,7 +656,7 @@ function generateLoginPage() {
       // 添加背景图相关函数
       async function setBingBackground() {
         try {
-          const response = await fetch('/bing', { cache: 'no-store' });  // 禁用缓存
+          const response = await fetch('/bing');
           const data = await response.json();
           if (data.status && data.data && data.data.length > 0) {
             const randomIndex = Math.floor(Math.random() * data.data.length);
@@ -673,7 +677,7 @@ function generateLoginPage() {
         const password = document.getElementById('password').value;
         
         try {
-          const response = await fetch('/', {
+          const response = await fetch('/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password })
@@ -707,19 +711,21 @@ function generateUploadPage() {
     <style>
       body {
         font-family: Arial, sans-serif;
-        transition: background-image 1s ease-in-out;
         display: flex;
         justify-content: center;
         align-items: center;
         height: 100vh;
         background: #f5f5f5;
         margin: 0;
+        background-size: cover;
+        background-position: center;
+        transition: background-image 1s ease-in-out;
       }
       .container {
         max-width: 800px;
         width: 100%;
-        background: rgba(255, 255, 255, 0.7);
-        backdrop-filter: blur(5px);
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(10px);
         padding: 10px 40px 20px 40px;
         border-radius: 8px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
@@ -832,6 +838,7 @@ function generateUploadPage() {
         transform: translate(-50%, -50%);
         color: white;
         font-size: 12px;
+        text-shadow: 1px 1px 1px rgba(0,0,0,0.5);
       }
       .success .progress-track {
         background: #28a745;
@@ -874,7 +881,7 @@ function generateUploadPage() {
       // 添加背景图相关函数
       async function setBingBackground() {
         try {
-          const response = await fetch('/bing', { cache: 'no-store' });  // 禁用缓存
+          const response = await fetch('/bing');
           const data = await response.json();
           if (data.status && data.data && data.data.length > 0) {
             const randomIndex = Math.floor(Math.random() * data.data.length);
@@ -936,7 +943,7 @@ function generateUploadPage() {
         for (let item of items) {
           if (item.kind === 'file') {
             const file = item.getAsFile();
-            await uploadFile(file);
+            await handleFiles({ target: { files: [file] } });
           }
         }
       });
@@ -951,8 +958,8 @@ function generateUploadPage() {
         for (let file of files) {
           // 直接在上传前进行大小判断
           if (file.size > config.maxSizeMB * 1024 * 1024) {
-            alert(\`文件超过\${config.maxSizeMB}MB限制\`);
-            return; // 如果文件过大则直接返回，不上传
+            alert(\`文件 \${file.name} 超过\${config.maxSizeMB}MB限制\`);
+            continue; // 跳过这个文件，继续处理下一个
           }
           await uploadFile(file); // 继续上传
         }
@@ -1026,7 +1033,8 @@ function generateUploadPage() {
       }
 
       function formatSize(bytes) {
-        const units = ['B', 'KB', 'MB', 'GB'];
+        if (bytes === 0) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
         let size = bytes;
         let unitIndex = 0;
         while (size >= 1024 && unitIndex < units.length - 1) {
@@ -1041,6 +1049,10 @@ function generateUploadPage() {
       }
 
       function copyUrls(format) {
+        if (uploadedUrls.length === 0) {
+            alert('没有可复制的链接');
+            return;
+        }
         let text = '';
         switch (format) {
           case 'url':
@@ -1062,7 +1074,7 @@ function generateUploadPage() {
 }
 
 // 生成文件管理页面 /admin
-function generateAdminPage(fileCards, qrModal) {
+function generateAdminPage(fileCards, qrModal, stats) {
   return `<!DOCTYPE html>
   <html lang="zh-CN">
   <head>
@@ -1077,63 +1089,70 @@ function generateAdminPage(fileCards, qrModal) {
         margin: 0;
         padding: 20px;
         background: #f5f5f5;
+        background-size: cover;
+        background-position: center;
+        transition: background-image 1s ease-in-out;
       }
       .container {
         max-width: 1200px;
         margin: 0 auto;
       }
       .header {
-        background: rgba(255, 255, 255, 0.7);
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(10px);
         padding: 20px 30px;
         border-radius: 8px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         margin-bottom: 20px;
         display: flex;
-        justify-content: flex-start;
+        justify-content: space-between;
         align-items: center;
+        flex-wrap: wrap;
       }
-      h2 {
-        margin: 0;
-        text-align: left;
-      }
-      .right-content {
+      .header-left {
         display: flex;
-        gap: 40px;
-        margin-left: auto;
         align-items: center;
+        gap: 20px;
+      }
+      h2 { margin: 0; }
+      #stats { color: #555; }
+      .header-right {
+        display: flex;
+        align-items: center;
+        gap: 15px;
       }
       .search {
         padding: 8px;
         border: 1px solid #ddd;
         border-radius: 4px;
-        width: 300px;
+        width: 250px;
         background: rgba(255, 255, 255, 0.5);
       }
       .backup {
-        display: inline-block;
-        margin-left: auto;
-        margin-right: 40px;
         color: #007bff;
         text-decoration: none;
       }
-      .backup:hover {
-        text-decoration: underline;
-      }
+      .backup:hover { text-decoration: underline; }
       .grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
         gap: 20px;
       }
       .file-card {
-        background: rgba(255, 255, 255, 0.7);
+        background: rgba(255, 255, 255, 0.8);
         border-radius: 8px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         overflow: hidden;
         position: relative;
+        transition: transform 0.2s, box-shadow 0.2s;
+      }
+      .file-card.selected {
+        transform: translateY(-5px);
+        box-shadow: 0 8px 20px rgba(0, 123, 255, 0.3);
       }
       .file-preview {
         height: 150px;
-        background: rgba(255, 255, 255, 0.5);
+        background: rgba(230, 230, 230, 0.5);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -1146,87 +1165,61 @@ function generateAdminPage(fileCards, qrModal) {
       .file-info {
         padding: 10px;
         font-size: 14px;
+        word-break: break-all;
       }
       .file-actions {
         padding: 10px;
         border-top: 1px solid #eee;
         display: flex;
         justify-content: space-between;
-        align-items: flex-end;
+        align-items: center;
         font-size: 12px;
       }
-      .file-actions .btn {
-        font-size: inherit;  /* 让所有按钮继承父容器的字体大小 */
-      }
-      /* .file-checkbox {
+      .file-checkbox {
         position: absolute;
-        left: 5px;
-        top: 5px;
+        left: 10px;
+        top: 10px;
         z-index: 10;
-      } */
+        transform: scale(1.2);
+      }
       .btn {
         padding: 5px 10px;
         border: none;
         border-radius: 4px;
         cursor: pointer;
       }
-      .btn-delete {
-        background: #dc3545;
-        color: white;
-      }
-      .btn-copy {
-        background: #007bff;
-        color: white;
-      }
-      .btn-down {
-        background: #007bff;
-        color: white;
-        text-decoration: none;
-      }
+      .btn-delete { background: #dc3545; color: white; }
+      .btn-copy { background: #007bff; color: white; }
+      .btn-down { background: #28a745; color: white; text-decoration: none; }
       .qr-modal {
-        display: none;
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
+        display: none; position: fixed; top: 0; left: 0;
+        width: 100%; height: 100%;
         background: rgba(0, 0, 0, 0.5);
-        justify-content: center;
-        align-items: center;
-        z-index: 1000;
+        justify-content: center; align-items: center; z-index: 1000;
       }
       .qr-content {
-        background: white;
-        padding: 20px;
-        border-radius: 10px;
-        text-align: center;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        background: white; padding: 20px; border-radius: 10px;
+        text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
       }
-      #qrcode {
-        margin: 5px 0;
-      }
-      .qr-buttons {
-        display: flex;
-        gap: 10px;
-        justify-content: center;
-        margin-top: 15px;
-      }
+      #qrcode { margin: 5px 0; }
+      .qr-buttons { display: flex; gap: 10px; justify-content: center; margin-top: 15px; }
       .qr-copy, .qr-close {
-        padding: 8px 20px;
-        background: #007bff;
-        color: white;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
+        padding: 8px 20px; background: #007bff; color: white;
+        border: none; border-radius: 5px; cursor: pointer;
       }
     </style>
   </head>
   <body>
     <div class="container">
       <div class="header">
-        <h2>文件管理</h2>
-        <div class="right-content">
-          <a href="/upload" class="backup">返回</a>
+        <div class="header-left">
+          <h2>文件管理</h2>
+          <div id="stats">共 ${stats.count} 个文件，总大小 ${stats.size}</div>
+        </div>
+        <div class="header-right">
+          <button id="deleteSelectedBtn" class="btn btn-delete" style="display: none;">删除选中</button>
+          <input type="checkbox" id="selectAllCheckbox" title="全选">
+          <a href="/upload" class="backup">返回上传</a>
           <input type="text" class="search" placeholder="搜索文件..." id="searchInput">
         </div>
       </div>
@@ -1237,13 +1230,11 @@ function generateAdminPage(fileCards, qrModal) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/qrcodejs/qrcode.min.js"></script>
-    <!-- 引入 JSZip 库 -->
-    <!-- <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script> -->
     <script>
       // 添加背景图相关函数
       async function setBingBackground() {
         try {
-          const response = await fetch('/bing', { cache: 'no-store' });  // 禁用缓存
+          const response = await fetch('/bing');
           const data = await response.json();
           if (data.status && data.data && data.data.length > 0) {
             const randomIndex = Math.floor(Math.random() * data.data.length);
@@ -1260,86 +1251,139 @@ function generateAdminPage(fileCards, qrModal) {
 
       const searchInput = document.getElementById('searchInput');
       const fileGrid = document.getElementById('fileGrid');
-      const fileCards = Array.from(fileGrid.children);
-
+      
       searchInput.addEventListener('input', (e) => {
         const searchTerm = e.target.value.toLowerCase();
-        fileCards.forEach(card => {
+        document.querySelectorAll('.file-card').forEach(card => {
           const fileName = card.querySelector('.file-info div:first-child').textContent.toLowerCase();
           card.style.display = fileName.includes(searchTerm) ? '' : 'none';
         });
       });
 
-      // 添加分享二维码功能
+      // 分享二维码功能
       let currentShareUrl = '';
       function showQRCode(url) {
-        currentShareUrl = url; // 存储当前分享的URL
+        currentShareUrl = url;
         const modal = document.getElementById('qrModal');
         const qrcodeDiv = document.getElementById('qrcode');
-        const copyBtn = document.querySelector('.qr-copy');
-        copyBtn.textContent = '复制链接';
-        copyBtn.disabled = false;
         qrcodeDiv.innerHTML = '';
-        new QRCode(qrcodeDiv, {
-          text: url,
-          width: 200,
-          height: 200,
-          colorDark: "#000000",
-          colorLight: "#ffffff",
-          correctLevel: QRCode.CorrectLevel.H
-        });
+        new QRCode(qrcodeDiv, { text: url, width: 200, height: 200 });
         modal.style.display = 'flex';
       }   
 
       function handleCopyUrl() {
-        navigator.clipboard.writeText(currentShareUrl)
-          .then(() => {
-            const copyBtn = document.querySelector('.qr-copy');
-            copyBtn.textContent = '✔ 已复制';
-            copyBtn.disabled = true;
-            setTimeout(() => {
-              copyBtn.textContent = '复制链接';
-              copyBtn.disabled = false;
-            }, 5000);
-          })
-          .catch(err => {
-            console.error('复制失败:', err);
-            alert('复制失败，请手动复制');
-          });
+        navigator.clipboard.writeText(currentShareUrl).then(() => alert('链接已复制'));
       }
 
       function closeQRModal() {
         document.getElementById('qrModal').style.display = 'none';
       }      
-      window.onclick = function(event) {
+      window.onclick = (event) => {
         const modal = document.getElementById('qrModal');
-        if (event.target === modal) {
-          modal.style.display = 'none';
-        }
+        if (event.target === modal) modal.style.display = 'none';
       }
 
+      // 单个文件删除功能
       async function deleteFile(url) {
         if (!confirm('确定要删除这个文件吗？')) return;
+        await performDelete([url]);
+      }
+
+      // --- 新增：全选和批量删除逻辑 ---
+      const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+      const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
+      const fileCheckboxes = document.querySelectorAll('.file-checkbox');
+
+      function updateSelectionState() {
+        const selectedCheckboxes = document.querySelectorAll('.file-checkbox:checked');
+        const allCheckboxes = document.querySelectorAll('.file-checkbox');
         
+        if (selectedCheckboxes.length > 0) {
+          deleteSelectedBtn.style.display = 'inline-block';
+          deleteSelectedBtn.textContent = \`删除选中 (\${selectedCheckboxes.length})\`;
+        } else {
+          deleteSelectedBtn.style.display = 'none';
+        }
+
+        if (allCheckboxes.length > 0) {
+            if (selectedCheckboxes.length === allCheckboxes.length) {
+                selectAllCheckbox.checked = true;
+                selectAllCheckbox.indeterminate = false;
+            } else if (selectedCheckboxes.length > 0) {
+                selectAllCheckbox.checked = false;
+                selectAllCheckbox.indeterminate = true;
+            } else {
+                selectAllCheckbox.checked = false;
+                selectAllCheckbox.indeterminate = false;
+            }
+        }
+
+        // 更新卡片样式
+        fileCheckboxes.forEach(cb => {
+            cb.closest('.file-card').classList.toggle('selected', cb.checked);
+        });
+      }
+
+      selectAllCheckbox.addEventListener('change', (e) => {
+        fileCheckboxes.forEach(checkbox => {
+          checkbox.checked = e.target.checked;
+        });
+        updateSelectionState();
+      });
+
+      fileCheckboxes.forEach(checkbox => {
+        checkbox.addEventListener('change', updateSelectionState);
+      });
+
+      deleteSelectedBtn.addEventListener('click', async () => {
+        const selectedUrls = Array.from(document.querySelectorAll('.file-checkbox:checked'))
+          .map(cb => cb.closest('.file-card').dataset.url);
+        
+        if (selectedUrls.length === 0) {
+          alert('请先选择要删除的文件');
+          return;
+        }
+
+        if (!confirm(\`确定要删除选中的 \${selectedUrls.length} 个文件吗？\n此操作不可恢复！\`)) return;
+        
+        await performDelete(selectedUrls);
+      });
+      
+      async function performDelete(urls) {
         try {
           const response = await fetch('/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url })
+            body: JSON.stringify({ urls })
           });
 
           if (!response.ok) {
             const errorData = await response.json();
-            throw new Error(errorData.error || '删除失败');
+            throw new Error(errorData.error || '删除请求失败');
           }
           
-          const card = document.querySelector(\`[data-url="\${url}"]\`);
-          if (card) card.remove();
-          alert('文件删除成功');
+          const resultData = await response.json();
+          let successCount = 0;
+          resultData.results.forEach(res => {
+              if(res.success) {
+                  const card = document.querySelector(\`[data-url="\${res.url}"]\`);
+                  if (card) card.remove();
+                  successCount++;
+              } else {
+                  console.error(\`删除 \${res.url} 失败: \`, res.error);
+              }
+          });
+          alert(\`删除操作完成: \${successCount}个成功, \${urls.length - successCount}个失败。\`);
+
         } catch (error) {
-          alert('文件删除失败: ' + error.message); // 显示错误的详细信息
+          alert('删除失败: ' + error.message);
+        } finally {
+            updateSelectionState();
         }
       }
+      
+      // 初始化状态
+      updateSelectionState();
     </script>
   </body>
   </html>`;
